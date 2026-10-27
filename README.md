@@ -27,7 +27,12 @@ credentials or cookies are carried between pages.
   upstream image, deployed by this chart (`searxng.enabled`) with a
   `settings.yml` that enables the JSON API and Brave, DuckDuckGo, Bing, Bing
   News and Google News.
-- **Chromium** ships in the image. `RENDER_ENABLED` (default `true`),
+- **Chromium** ships in the image and renders with its own sandbox on: the
+  server runs as a non-root user (UID 10001), and with `render.enabled` the
+  chart lets the pod create the user namespaces that sandbox needs (seccomp
+  `Unconfined`; Chromium filters each renderer with its own seccomp policy).
+  Where a runtime forbids them, Chromium does not start and pages are not
+  rendered, rather than rendered unsandboxed. `RENDER_ENABLED` (default `true`),
   `RENDER_POOL_SIZE` (default 2) and `RENDER_TIMEOUT_SECS` (default 20) come
   from the chart's `render` values.
 - **tgi-core** (`TGI_URL`, `DEFAULT_MODEL`) scores crawled pages and plans and

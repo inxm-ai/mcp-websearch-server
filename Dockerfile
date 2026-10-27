@@ -27,3 +27,8 @@ RUN apt-get update \
 ENV STYGIAN_CHROME_PATH=/usr/bin/chromium
 COPY --from=builder /build/target/release/mcp-websearch /usr/local/bin/mcp-websearch
 RUN chmod +x /usr/local/bin/mcp-websearch
+# Chromium renders arbitrary pages with its own sandbox on, and that sandbox
+# only runs for a non-root user, so the whole server runs as one. The chart
+# pins the same UID (infra/helm/templates/deployment.yaml).
+RUN useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin websearch
+USER 10001:10001

@@ -11,7 +11,10 @@ name: CI
 # runs it (scripts/test-image-starts.sh: libraries, init containers, at least
 # one tool listed), then runs the fleet smoke engine on it
 # (infra/run-image-smoke.sh: the exact tool list from infra/expected-tools.txt,
-# and real calls through infra/smoke-tool.sh, including a Chromium render).
+# and real HTTP-stage calls through infra/smoke-tool.sh), and finally renders
+# a JavaScript page with Chromium's sandbox on under the chart's security
+# settings (scripts/test-render-sandbox.sh), which the fleet smoke's plain
+# `docker run` cannot do.
 
 on:
   pull_request:
@@ -48,3 +51,4 @@ jobs:
           cache-to: type=gha,mode=max
       - run: bash scripts/test-image-starts.sh mcp-websearch-server:ci
       - run: bash infra/run-image-smoke.sh mcp-websearch-server:ci
+      - run: bash scripts/test-render-sandbox.sh mcp-websearch-server:ci

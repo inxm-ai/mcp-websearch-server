@@ -113,9 +113,13 @@ impl StygianRenderer {
             proxy: None,
             proxy_bypass_list: None,
             proxy_source: None,
-            // The pod is the sandbox: Chromium's own needs user namespaces
-            // the cluster does not grant to a container running as root.
-            disable_sandbox: true,
+            // Chromium's own sandbox stays on: it isolates the renderers that
+            // run arbitrary pages from this server. stygian would switch it
+            // off inside a container, so this is explicit. It needs a
+            // non-root user and user namespaces; where those are missing
+            // Chromium does not start and pages fail to render, rather than
+            // render unsandboxed.
+            disable_sandbox: false,
             args,
             pool: PoolConfig {
                 min_size: WARM_BROWSERS.min(self.pool_size),
