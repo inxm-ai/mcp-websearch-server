@@ -63,6 +63,24 @@ merge it when the `image` check is green.
 - Don't add a build argument that changes the bridge registry: this repo's
   deploy builds on GHCR.
 
+## Publishing
+
+`build-and-publish.yaml` runs on merge to `main` (and on tags): after
+`ci.yaml` and `harness.yaml` pass, it builds the image once and copies that
+one build to GHCR (`GITHUB_TOKEN`; `latest`, `sha-<short>`, `<tag>`) and,
+through lz-azure's `push-to-acr.yml` and lz-aws's `push-to-ecr.yml`, image
+and chart to ACR and ECR, where lz-infra's deploy reads them. Every registry
+ends up with the build's digest; each push job checks it.
+
+- The repo is public, so org secrets (`GH_DEPLOY_TOKEN` and the like) never
+  reach its workflows. Publish with `GITHUB_TOKEN` and OIDC only;
+  `scripts/test-publish-workflow.sh` (in `ci.yaml`) fails on any `secrets.`.
+- ACR and ECR need this repo on lz-infra's publisher list
+  (`config/publishers.yaml`); its onboarding sets `PUBLISH_ARTIFACTS`, and
+  the two push jobs skip until it is set.
+- Nothing here deploys. `infra/playbook.yaml` (lz-aws 004) deploys the
+  published ECR image of the commit it is given; it never builds one.
+
 ## Constraints
 
 <!-- PLACEHOLDER: replace with this repo's real invariants as they emerge.
