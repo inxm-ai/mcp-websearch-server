@@ -1,0 +1,74 @@
+appName: mcp-websearch-server
+description: "Self-hosted web search, page extraction, crawl and research MCP server: SearXNG for search, stygian-browser for rendering"
+replicaCount: 1
+
+image:
+  repository: inxm-ai/mcp-websearch-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 8000
+
+networking:
+  mode: ingress
+  gateway:
+    hostname: ""
+    parentRefs:
+      - name: orchestrator-gateway
+        sectionName: https
+
+env:
+  SERVICE_NAME: mcp-websearch-server
+  HOSTNAME: "{{ hostname | default('') }}"
+  MCP_BASE_PATH: "/api/mcp-websearch-server"
+
+  AGENT_CARD_CACHE_FILE: /data/agent.json
+  TGI_URL: http://app-tgi-core.orchestrator.svc.cluster.local:8000/v1
+  DEFAULT_MODEL: "tgi"
+  TOOL_INJECTION_MODE: claude
+  OTLP_ENDPOINT: http://ops-otel-collector:4317
+  MCP_SERVER_COMMAND: "/usr/local/bin/mcp-websearch"
+
+
+persistence:
+  enabled: true
+  # Storage class names, left empty so `helm lint`/`helm template` render
+  # against the cluster default without failing; the playbook sets both from
+  # per-cluster inventory at deploy time. `file` (RWX-capable, e.g. EFS) backs
+  # this repo's /data PVC. `block` has no consumer in the base template — it
+  # mirrors the fleet-wide playbook contract so repos that add a block-storage
+  # resource later (e.g. a database PVC, see mcp-memory-server) need no
+  # playbook changes.
+  file: ""
+  block: ""
+  accessMode: ReadWriteMany
+  size: 50Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+podAnnotations: {}
+
+# Fleet-standard default footprint. Override per repo from measured usage
+# (kubectl top): raise limits if the server OOMs or throttles; keep requests
+# close to real idle/steady usage — they reserve node capacity fleet-wide.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,47 @@
+name: CI
+
+# Repo-owned build and deployment conformance. The deterministic Rust
+# sensors (fmt, clippy, the typed-tool-returns fitness function, test) live
+# in the renderer-managed harness.yaml — never duplicate one here.
+#
+# The image build below is a distinct gate, not a duplicate of harness.yaml:
+# the Dockerfile cross-compiles a musl binary with its own toolchain and
+# target (see Dockerfile), which harness.yaml's host-glibc `cargo build`
+# does not exercise. It then checks that the image starts the way the chart
+# runs it (scripts/test-image-starts.sh: libraries, init containers, at least
+# one tool listed). It does not yet run infra/run-image-smoke.sh — asserting
+# the exact tool list (infra/expected-tools.txt) is repo-owned follow-up work
+# once this server has tools worth asserting on; see rust-harness/README.md.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - run: helm lint infra/helm
+      - run: helm template mcp-websearch-server infra/helm >/dev/null
+
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: mcp-websearch-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: bash scripts/test-image-starts.sh mcp-websearch-server:ci

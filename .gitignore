@@ -1,0 +1,16 @@
+# Rust — Cargo.lock IS committed (this is a binary, not a library)
+/target
+
+# Tool caches and reports
+.harness/
+coverage/
+lcov.info
+
+# Local configuration
+.env
+*.local
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store

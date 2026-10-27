@@ -1,0 +1,114 @@
+---
+- name: Deploy mcp websearch server
+  hosts: all
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path | default('/home/runner/.kube/config') }}"
+
+  vars:
+    # Substituted at generation time: true for fastmcp/vendored repos (the
+    # repo's Dockerfile bakes the server onto the stock bridge base and MUST
+    # be built and deployed), false for remote-URL/plain-command repos (the
+    # stock bridge image from values.yaml is the whole deployment).
+    builds_own_image: true
+    networking_mode: "{{ gateway_networking_mode | default('ingress') }}"
+    networking_gateway_hostname: "{{ gateway_hostname | default(hostname) }}"
+
+  tasks:
+    - name: Install kubernetes.core collection
+      command: ansible-galaxy collection install kubernetes.core
+      delegate_to: localhost
+      run_once: true
+
+    - name: Install oauth2-proxy ingress module
+      when: networking_mode != 'gateway'
+      git:
+        repo: https://{{ github_username }}:{{ github_token }}@github.com/inxm-ai/tools-ansible-oauth2-proxy-module.git
+        dest: ./roles/oauth2_proxy_ingress
+        version: main
+        force: yes
+
+    - name: Clone the private GitHub repository
+      git:
+        repo: https://{{ github_username }}:{{ github_token }}@github.com/inxm-ai/mcp-websearch-server.git
+        dest: /tmp/mcp-websearch-server
+
+    - name: Build and optionally push the mcp-websearch-server image
+      when: builds_own_image
+      shell: |
+        set -euo pipefail
+        if [ -n "{{ extra_docker_repository_url | default('') }}" ]; then
+          docker build -t {{ extra_docker_repository_url }}:latest /tmp/mcp-websearch-server
+          docker push {{ extra_docker_repository_url }}:latest
+          docker inspect --format='{% raw %}{{index .RepoDigests 0}}{% endraw %}' \
+            {{ extra_docker_repository_url }}:latest
+        else
+          eval $(minikube -p minikube docker-env)
+          docker build -t inxm-ai/mcp-websearch-server:latest /tmp/mcp-websearch-server
+          docker images --no-trunc --quiet inxm-ai/mcp-websearch-server:latest
+        fi
+      args:
+        executable: /bin/bash
+      register: docker_build_result
+
+    - name: Record the built image reference
+      when: builds_own_image
+      set_fact:
+        # Becomes a pod annotation, so `helm upgrade` rolls exactly when the
+        # image changed instead of relying on a separate rollout restart.
+        built_image_reference: "{{ docker_build_result.stdout_lines | last | trim }}"
+
+    - name: Package the Helm chart
+      command: >
+        helm package /tmp/mcp-websearch-server/infra/helm
+      args:
+        chdir: /tmp
+
+    - name: Check contents of /tmp directory
+      command: ls -la /tmp
+      register: tmp_contents
+
+    - name: Print contents of /tmp directory
+      debug:
+        var: tmp_contents.stdout_lines
+
+    - name: Deploy Helm chart
+      command: >
+        helm upgrade --install mcp-websearch-server
+        --kubeconfig {{ kubeconfig_path | default('/home/runner/.kube/config') }}
+        /tmp/mcp-websearch-server-0.0.1.tgz
+        --set env.HOSTNAME={{hostname}}
+        --set env.AUTH_BASE_URL="https://{{auth_base_url}}"
+        --set env.AUTH_PROVIDER="keycloak"
+        --set networking.mode={{ networking_mode }}
+        --set networking.gateway.hostname={{ networking_gateway_hostname }}
+        {% if builds_own_image and extra_docker_repository_url | default('') %}
+        --set image.repository={{ extra_docker_repository_url }}
+        --set image.pullPolicy=Always
+        {% endif %}
+        {% if built_image_reference is defined %}
+        --set podAnnotations.imageReference={{ built_image_reference }}
+        {% endif %}
+        --set persistence.file={{ persistence_file | default('') }}
+        --set persistence.block={{ persistence_block | default('') }}
+        --namespace orchestrator
+        --create-namespace
+
+    - name: Delete the existing pod to retrigger deployment
+      # Image-building repos roll via the imageReference pod annotation above;
+      # stock-bridge repos still need the restart to repull :latest.
+      when: not builds_own_image
+      command: >
+        kubectl rollout restart deployment/mcp-websearch-server -n orchestrator
+        --kubeconfig {{ kubeconfig_path | default('/home/runner/.kube/config') }}
+
+    - name: Register mcp-websearch-server with oauth2-proxy ingress
+      when: networking_mode != 'gateway'
+      include_role:
+        name: oauth2_proxy_ingress
+      vars:
+        service_name: "mcp-websearch-server"
+        service_path: "/api/mcp-websearch-server"
+        service_port: 8000
+        hostname: "{{ hostname }}"
+        namespace: "orchestrator"
+        ingress_name: "iam-oauth2-proxy-auth"

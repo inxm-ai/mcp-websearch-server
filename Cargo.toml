@@ -1,0 +1,52 @@
+# Harness keys in this file are managed by tools-create-mcp-repo/rust-harness at 9a6d487.
+# Repo-owned keys are preserved; re-render to update the managed ones.
+
+[package]
+name = "mcp-websearch-server"
+version = "0.1.0"
+description = "Self-hosted web search, page extraction, crawl and research MCP server: SearXNG for search, stygian-browser for rendering"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+
+# Renamed so the built binary matches the bridge's expected launcher path
+# (/usr/local/bin/mcp-websearch) instead of the full mcp-websearch-server name.
+[[bin]]
+name = "mcp-websearch"
+path = "src/main.rs"
+
+[lints.rust]
+# stdout is the JSON-RPC wire for the stdio transport (see AGENTS.md);
+# `#[forbid]` on unsafe_code is unrelated but a cheap, uncontroversial
+# default for a thin protocol adapter that owns no unsafe boundary.
+unsafe_code = "forbid"
+
+[dependencies]
+anyhow = ">=1,<2"
+rmcp = { version = ">=3.1,<4", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = ">=1,<2"
+serde = { version = ">=1,<2", features = ["derive"] }
+serde_json = ">=1,<2"
+tokio = { version = ">=1.40,<2", features = ["rt-multi-thread", "macros", "io-std"] }
+tracing = ">=0.1,<0.2"
+tracing-subscriber = { version = ">=0.3,<0.4", features = ["env-filter"] }
+
+[lints.clippy]
+# Warn, not deny: `cargo build` stays fast and quiet during normal
+# iteration. `cargo clippy -- -D warnings` (make harness, CI) turns every one
+# of these into a hard gate — see the Makefile.
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+dbg_macro = "warn"
+# The stdio transport speaks JSON-RPC over stdout; a stray `println!` in
+# tool code corrupts every message on the wire after it. Use `tracing`
+# (initialized to stderr in main.rs) instead.
+print_stdout = "warn"
+
+# Repository-owned dev dependencies (test fixtures, fakes) go here. The
+# harness's own dev-dependencies (syn, walkdir) are merged in separately by
+# tools-create-mcp-repo/rust-harness — never duplicate one of those pins here.
+[dev-dependencies]
+syn = { version = ">=2.0,<3", features = ["full", "visit"] }
+walkdir = ">=2.5,<3"

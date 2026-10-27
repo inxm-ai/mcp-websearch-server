@@ -1,0 +1,33 @@
+# Rendered from tools-create-mcp-repo/rust-harness at 9a6d487.
+# Do not edit directly; update the canonical harness and re-render.
+
+name: Harness
+
+# The deterministic sensors, one step each — the same set `make harness` runs
+# locally. Build, chart and deployment checks belong to the repo-owned
+# ci.yaml; a sensor must never run in both files.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # trigger-deployment.yaml calls this before it deploys.
+  workflow_call:
+
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # Coverage is a reported signal, never a gate — no thresholds anywhere.
+      - run: cargo llvm-cov --workspace --all-features --summary-only
