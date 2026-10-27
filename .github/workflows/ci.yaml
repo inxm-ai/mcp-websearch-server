@@ -20,7 +20,7 @@ on:
   pull_request:
   push:
     branches: [main]
-  # trigger-deployment.yaml calls this before it deploys.
+  # build-and-publish.yaml calls this before it publishes.
   workflow_call:
 
 jobs:
@@ -33,6 +33,17 @@ jobs:
       - uses: azure/setup-helm@v5
       - run: helm lint infra/helm
       - run: helm template mcp-websearch-server infra/helm >/dev/null
+
+  # The publish wiring: workflow syntax, then what build-and-publish.yaml
+  # and the playbook must keep (scripts/test-publish-workflow.sh).
+  workflows:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+      - run: bash scripts/test-publish-workflow.sh
 
   image:
     runs-on: ubuntu-latest

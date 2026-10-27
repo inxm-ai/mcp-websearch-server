@@ -1,0 +1,185 @@
+name: Build and publish
+
+# Runs this repo's checks (ci.yaml and harness.yaml), builds the
+# mcp-websearch-server image once and packages its chart, then publishes that
+# one build everywhere, so every registry holds the same image digest:
+#
+#   push-ghcr  ghcr.io/inxm-ai/mcp-websearch-server, with this run's
+#              GITHUB_TOKEN; tagged like enterprise-mcp-bridge: latest and
+#              sha-<short sha> on main, <tag> on a tag push.
+#   push-acr   inxm-ai/lz-azure push-to-acr.yml: image and chart to acrinxmai,
+#   push-ecr   inxm-ai/lz-aws push-to-ecr.yml: image and chart to ECR,
+#              both as :<git sha> and :latest (inxm-ai/lz-infra#55; those are
+#              the registries lz-infra's deploy reads). They sign in as this
+#              repo's own publish identity and role, which lz-infra's
+#              publisher list (config/publishers.yaml) sets up. Until that
+#              onboarding has run, PUBLISH_ARTIFACTS is unset and both skip.
+#
+# Nothing here deploys, and no token beyond GITHUB_TOKEN and OIDC is used:
+# this repo is public, so org secrets such as GH_DEPLOY_TOKEN never reach it.
+# QA deploys through lz-aws 004 (run by hand), which pins this commit's ECR
+# image; Azure clusters pick up ACR's :latest on their next update.
+#
+# Pull requests run ci.yaml and harness.yaml on their own.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: mcp-websearch-server
+
+jobs:
+  # Publish only a commit that passed this repo's checks.
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
+  harness:
+    uses: ./.github/workflows/harness.yaml
+
+  build:
+    name: Build image and package chart
+    needs: [ci, harness]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      ghcr-tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # enterprise-mcp-bridge's tags; the labels link the GHCR package to
+      # this repo.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
+            type=ref,event=tag
+
+      - uses: docker/setup-buildx-action@v4
+
+      # One OCI archive holding one image, which every push job copies
+      # unchanged. linux/amd64 only: no cluster runs ARM. The image ci.yaml
+      # checked comes from the same Dockerfile and build cache.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=oci,dest=dist/image/${{ env.IMAGE_NAME }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Same Helm as push-to-acr.yml and push-to-ecr.yml; Marketplace
+      # installs use Helm 3.
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.14.4
+
+      - name: Package chart
+        run: helm package infra/helm --destination dist/chart
+
+      # The push jobs download them by these names.
+      - name: Upload chart
+        uses: actions/upload-artifact@v7
+        with:
+          name: chart
+          path: dist/chart/*.tgz
+          if-no-files-found: error
+
+      - name: Upload image
+        uses: actions/upload-artifact@v7
+        with:
+          name: image
+          path: dist/image/*.tar
+          if-no-files-found: error
+
+  push-ghcr:
+    name: Push to GHCR
+    needs: build
+    # A run on another branch gets no tags, so there is nothing to push.
+    if: ${{ needs.build.outputs.ghcr-tags != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v8
+        with:
+          name: image
+          path: image
+
+      # skopeo copies the archive's manifests and blobs as they are (every
+      # platform, attestations included); --preserve-digests fails rather
+      # than convert. A docker load/push round trip can change the digest.
+      - name: Push image
+        env:
+          TAGS: ${{ needs.build.outputs.ghcr-tags }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(image/*.tar)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+            echo "::error::Expected one OCI archive in artifact 'image', found ${#archives[@]}."
+            exit 1
+          fi
+          archive="${archives[0]}"
+          digest="$(tar -xOf "${archive}" index.json | jq -r '.manifests[0].digest')"
+          command -v skopeo >/dev/null || sudo apt-get install --yes --no-install-recommends skopeo
+          skopeo login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin <<<"${GH_TOKEN}"
+          {
+            echo "### Image pushed to GHCR"
+            echo
+            echo "| Image | Digest |"
+            echo "|---|---|"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          while IFS= read -r target; do
+            [[ -n "${target}" ]] || continue
+            skopeo copy --all --preserve-digests --quiet "oci-archive:${archive}" "docker://${target}"
+            pushed="sha256:$(skopeo inspect --raw "docker://${target}" | sha256sum | cut -d' ' -f1)"
+            if [[ "${pushed}" != "${digest}" ]]; then
+              echo "::error::${target} has digest ${pushed}, but the build produced ${digest}."
+              exit 1
+            fi
+            echo "| \`${target}\` | \`${pushed}\` |" >> "${GITHUB_STEP_SUMMARY}"
+          done <<<"${TAGS}"
+
+  # ACR_PUBLISH_CLIENT_ID and PUBLISH_ARTIFACTS are set by lz-infra's
+  # onboarding, PUBLISH_ARTIFACTS last, once both clouds are set up.
+  push-acr:
+    name: Push to ACR
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && vars.PUBLISH_ARTIFACTS != '' }}
+    permissions:
+      id-token: write
+    uses: inxm-ai/lz-azure/.github/workflows/push-to-acr.yml@main
+    with:
+      azure-client-id: ${{ vars.ACR_PUBLISH_CLIENT_ID }}
+      chart-artifact: chart
+      image-artifact: image
+      image-name: mcp-websearch-server
+
+  push-ecr:
+    name: Push to ECR
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && vars.PUBLISH_ARTIFACTS != '' }}
+    permissions:
+      id-token: write
+    uses: inxm-ai/lz-aws/.github/workflows/push-to-ecr.yml@main
+    with:
+      chart-artifact: chart
+      image-artifact: image
+      image-name: mcp-websearch-server
