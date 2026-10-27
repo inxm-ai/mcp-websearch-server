@@ -24,6 +24,7 @@ handles auth.
 | All sensors, terse summary — run before wrapping up | `make harness` |
 | Test | `cargo test --workspace --all-targets --all-features` |
 | Lint and format check | `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| Renderer tests against a real Chromium (ignored by default; needs Chrome or Chromium installed) | `cargo test --lib -- --ignored` |
 | Coverage (reported signal, never a gate) | `cargo llvm-cov --workspace --all-features --summary-only` |
 | Refresh the lockfile after changing dependencies | `cargo generate-lockfile` |
 
