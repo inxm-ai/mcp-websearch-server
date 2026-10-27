@@ -9,9 +9,9 @@ name: CI
 # target (see Dockerfile), which harness.yaml's host-glibc `cargo build`
 # does not exercise. It then checks that the image starts the way the chart
 # runs it (scripts/test-image-starts.sh: libraries, init containers, at least
-# one tool listed). It does not yet run infra/run-image-smoke.sh — asserting
-# the exact tool list (infra/expected-tools.txt) is repo-owned follow-up work
-# once this server has tools worth asserting on; see rust-harness/README.md.
+# one tool listed), then runs the fleet smoke engine on it
+# (infra/run-image-smoke.sh: the exact tool list from infra/expected-tools.txt,
+# and real calls through infra/smoke-tool.sh, including a Chromium render).
 
 on:
   pull_request:
@@ -47,3 +47,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: bash scripts/test-image-starts.sh mcp-websearch-server:ci
+      - run: bash infra/run-image-smoke.sh mcp-websearch-server:ci

@@ -1,0 +1,9 @@
+# Tools this image must serve (checked by infra/run-image-smoke.sh, level 3).
+# Names and schemas copy mcp-tavily-server's so existing plans keep working.
+crawl
+crawl_company_website
+download_file
+extract
+search
+search_social_media
+web_research

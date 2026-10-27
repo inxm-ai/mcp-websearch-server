@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Level-4 image smoke: real tool calls through the running image.
+#
+#   1. `extract` reads https://inxm.ai, whose HTML holds no readable text
+#      (a JavaScript app), so more than a little text proves the Chromium
+#      render stage works inside the image; in the same call a private
+#      address is refused before any request.
+#   2. `crawl_company_website` of https://inxm.ai with max_depth=1 returns
+#      more than one page.
+# `search` needs SearXNG, which this container has no route to; it is
+# checked after deploy, inside the cluster.
+#
+# Usage:  bash infra/smoke-tool.sh <base-url>     (called by run-image-smoke.sh)
+# Deps:   python3 on the runner and outbound internet; nothing enters the image.
+set -euo pipefail
+
+BASE_URL="${1:?usage: smoke-tool.sh <base-url>}"
+
+python3 - "${BASE_URL}" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/")
+TIMEOUT_SECONDS = 240
+# inxm.ai's HTML holds a "Skip to content" link and nothing else readable.
+MIN_RENDERED_CHARS = 1_000
+ERROR_BODY_LIMIT = 600
+
+
+def call(tool, arguments):
+    request = urllib.request.Request(  # noqa: S310 -- the smoke's own bridge URL
+        f"{base_url}/tools/{tool}",
+        data=json.dumps(arguments).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310
+            body = json.load(response)
+    except urllib.error.HTTPError as failure:
+        detail = failure.read().decode("utf-8", errors="replace")[:ERROR_BODY_LIMIT]
+        raise SystemExit(f"{tool}: HTTP {failure.code} from the bridge: {detail}") from None
+    if body.get("isError"):
+        raise SystemExit(f"{tool} failed: {json.dumps(body)[:ERROR_BODY_LIMIT]}")
+    return body.get("structuredContent") or {}
+
+
+extracted = call("extract", {"urls": ["https://inxm.ai", "http://10.0.0.1/admin"]})
+pages = {page["url"]: page["text"] for page in extracted.get("extracted", [])}
+failures = {failure["url"]: failure["error"] for failure in extracted.get("failed", [])}
+rendered_chars = len(pages.get("https://inxm.ai", ""))
+if rendered_chars < MIN_RENDERED_CHARS:
+    raise SystemExit(f"extract did not render inxm.ai ({rendered_chars} chars): {json.dumps(extracted)[:ERROR_BODY_LIMIT]}")
+if failures.get("http://10.0.0.1/admin") != "refused: private address":
+    raise SystemExit(f"a private address was not refused: {json.dumps(failures)}")
+
+crawled = call("crawl_company_website", {"url": "https://inxm.ai", "max_depth": 1, "max_breadth": 5})
+crawled_pages = len(crawled.get("extracted", []))
+if crawled_pages < 2:
+    raise SystemExit(f"crawl_company_website returned {crawled_pages} page(s): {json.dumps(crawled)[:ERROR_BODY_LIMIT]}")
+
+print(f"smoke: inxm.ai rendered to {rendered_chars} chars, private address refused, crawl read {crawled_pages} pages")
+PY
