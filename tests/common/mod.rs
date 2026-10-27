@@ -10,11 +10,13 @@ use mcp_websearch_server::fetch::{FetchError, FetchedBody, HttpFetcher};
 use mcp_websearch_server::model::{ChatModel, ModelError, ModelTier};
 use url::Url;
 
+const REDIRECT_STATUS: u16 = 302;
+
 /// Answers each URL from a fixed table; unknown URLs time out. Records
 /// every URL requested.
 pub struct ScriptedHttp {
     pages: HashMap<String, (u16, String, Vec<u8>)>,
-    /// URL → where its redirect chain ends (served from `pages`).
+    /// URL → the `Location` it answers with a 302.
     redirects: HashMap<String, String>,
     pub requested: Mutex<Vec<String>>,
 }
@@ -56,18 +58,21 @@ impl HttpFetcher for ScriptedHttp {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(url.to_string());
-        let final_url = match self.redirects.get(url.as_str()) {
-            Some(target) => {
-                Url::parse(target).map_err(|error| FetchError::Network(error.to_string()))?
-            }
-            None => url.clone(),
-        };
-        let (status, content_type, body) = self
-            .pages
-            .get(final_url.as_str())
-            .ok_or(FetchError::Timeout)?;
+        if let Some(target) = self.redirects.get(url.as_str()) {
+            return Ok(FetchedBody {
+                final_url: url.clone(),
+                status: REDIRECT_STATUS,
+                content_type: String::new(),
+                location: Some(target.clone()),
+                body: Vec::new(),
+                truncated: false,
+            });
+        }
+        let (status, content_type, body) =
+            self.pages.get(url.as_str()).ok_or(FetchError::Timeout)?;
         Ok(FetchedBody {
-            final_url,
+            final_url: url.clone(),
+            location: None,
             status: *status,
             content_type: content_type.clone(),
             body: body.iter().copied().take(max_bytes).collect(),

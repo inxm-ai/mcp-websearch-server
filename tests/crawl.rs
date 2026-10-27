@@ -386,6 +386,8 @@ async fn a_start_page_redirecting_elsewhere_does_not_move_the_crawl() {
     let (crawler, http, _) = crawler(
         ScriptedHttp::new(&[
             ("https://start.example/robots.txt", 404, HTML, ""),
+            // The redirect hop consults the target host's robots.txt.
+            ("https://elsewhere.example/robots.txt", 404, HTML, ""),
             ("https://elsewhere.example/", 200, HTML, &landing),
             (
                 "https://elsewhere.example/other-page",
@@ -463,4 +465,100 @@ async fn a_stalled_model_leaves_pages_unscored_by_the_deadline() {
         "the unscored page is kept"
     );
     assert_eq!(outcome.scoring_failures, 1);
+}
+
+#[tokio::test]
+async fn a_redirect_into_a_disallowed_path_is_not_fetched() {
+    let home = page("Home", &["/go"]);
+    let (crawler, http, _) = crawler(
+        ScriptedHttp::new(&[
+            (
+                "https://site.example/robots.txt",
+                200,
+                "text/plain",
+                "User-agent: *\nDisallow: /private\n",
+            ),
+            ("https://site.example/", 200, HTML, &home),
+            (
+                "https://site.example/private",
+                200,
+                HTML,
+                &page("Private", &[]),
+            ),
+        ])
+        .with_redirect("https://site.example/go", "https://site.example/private"),
+        ScriptedModel::new(&[]),
+    );
+
+    let outcome = crawler
+        .crawl(&plan("https://site.example/"), far_deadline())
+        .await;
+
+    let urls: Vec<&str> = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| page.url.as_str())
+        .collect();
+    assert_eq!(urls, vec!["https://site.example/"]);
+    let failed: Vec<(&str, &str)> = outcome
+        .response
+        .failed
+        .iter()
+        .map(|failure| (failure.url.as_str(), failure.error.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![("https://site.example/go", "disallowed by robots.txt")]
+    );
+    assert!(!http
+        .requested()
+        .contains(&"https://site.example/private".to_string()));
+}
+
+#[tokio::test]
+async fn a_redirected_robots_txt_is_still_read() {
+    let home = page("Home", &["/private/x", "/open"]);
+    let (crawler, _, _) = crawler(
+        ScriptedHttp::new(&[
+            (
+                "https://www.site.example/robots.txt",
+                200,
+                "text/plain",
+                "User-agent: *\nDisallow: /private\n",
+            ),
+            ("https://site.example/", 200, HTML, &home),
+            ("https://site.example/open", 200, HTML, &page("Open", &[])),
+        ])
+        .with_redirect(
+            "https://site.example/robots.txt",
+            "https://www.site.example/robots.txt",
+        ),
+        ScriptedModel::new(&[]),
+    );
+
+    let outcome = crawler
+        .crawl(&plan("https://site.example/"), far_deadline())
+        .await;
+
+    let urls: Vec<&str> = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| page.url.as_str())
+        .collect();
+    assert_eq!(
+        urls,
+        vec!["https://site.example/", "https://site.example/open"]
+    );
+    let failed: Vec<(&str, &str)> = outcome
+        .response
+        .failed
+        .iter()
+        .map(|failure| (failure.url.as_str(), failure.error.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![("https://site.example/private/x", "disallowed by robots.txt")]
+    );
 }

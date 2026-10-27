@@ -1,8 +1,9 @@
-//! [`HttpFetcher`] over reqwest, enforcing the address policy at every hop:
-//! hostnames resolve to public addresses only, IP literals and every
-//! redirect target are checked before they are requested, proxies are
-//! ignored so the check always applies, and no cookies or credentials are
-//! sent.
+//! [`HttpFetcher`] over reqwest, enforcing the address policy on every
+//! request: hostnames resolve to public addresses only, IP literals are
+//! checked before they are requested, proxies are ignored so the check
+//! always applies, and no cookies or credentials are sent. Redirects are
+//! not followed here: `fetch::get_following_redirects` follows them one
+//! checked hop at a time.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use reqwest::redirect;
 use url::Url;
 
@@ -22,9 +23,8 @@ pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "; +https://inxm.ai)"
 );
-const MAX_REDIRECTS: usize = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Limit for one URL, redirects and body included.
+/// Limit for one request, body included.
 pub const PER_URL_TIMEOUT: Duration = Duration::from_secs(20);
 const ACCEPT_PAGES: &str = "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8";
 
@@ -58,20 +58,11 @@ pub struct ReqwestFetcher {
 
 impl ReqwestFetcher {
     pub fn new() -> anyhow::Result<Self> {
-        let policy = redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(Refusal::TooManyRedirects(MAX_REDIRECTS));
-            }
-            match check_url(attempt.url()) {
-                Ok(()) => attempt.follow(),
-                Err(refusal) => attempt.error(refusal),
-            }
-        });
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .no_proxy()
             .dns_resolver(Arc::new(PublicOnlyResolver))
-            .redirect(policy)
+            .redirect(redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(PER_URL_TIMEOUT)
             .build()?;
@@ -101,8 +92,6 @@ fn fetch_error(error: &reqwest::Error) -> FetchError {
     }
     let kind = if error.is_connect() {
         "could not connect"
-    } else if error.is_redirect() {
-        "redirect failed"
     } else {
         "request failed"
     };
@@ -129,6 +118,11 @@ impl HttpFetcher for ReqwestFetcher {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let mut body = Vec::new();
         let mut truncated = false;
         while let Some(chunk) = response
@@ -148,6 +142,7 @@ impl HttpFetcher for ReqwestFetcher {
             final_url,
             status,
             content_type,
+            location,
             body,
             truncated,
         })

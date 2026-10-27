@@ -6,7 +6,7 @@ use url::Url;
 use crate::address_policy::{check_url, Refusal};
 use crate::contract::DownloadedFile;
 use crate::extract::media_type;
-use crate::fetch::{FetchError, HttpFetcher};
+use crate::fetch::{get_following_redirects, AnyHop, FetchError, HttpFetcher};
 use crate::tool_failure::FailureKind;
 
 /// Largest file returned; a bigger one fails instead of arriving cut.
@@ -85,8 +85,7 @@ pub async fn download(
     let url =
         Url::parse(url.trim()).map_err(|error| DownloadFailure::InvalidUrl(error.to_string()))?;
     check_url(&url).map_err(DownloadFailure::Refused)?;
-    let fetched = http
-        .get(&url, MAX_DOWNLOAD_BYTES)
+    let fetched = get_following_redirects(http, &url, MAX_DOWNLOAD_BYTES, &AnyHop)
         .await
         .map_err(|error| match error {
             FetchError::Refused(refusal) => DownloadFailure::Refused(refusal),

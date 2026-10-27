@@ -34,6 +34,7 @@ use url::Url;
 
 use crate::address_policy::{check_url, is_public_ip, loggable_url, Refusal};
 use crate::extract::{RenderError, RenderedPage, Renderer};
+use crate::fetch::HopGate;
 
 /// Warm browsers kept once the pool exists; more start on demand up to the
 /// configured pool size.
@@ -199,7 +200,8 @@ async fn refusal_for(
 /// first refusal of a document request in `main_frame` (a navigation or
 /// redirect of the page being read), which the caller turns into the page's
 /// failure, and the guard itself, which answers paused requests for as long
-/// as it is polled.
+/// as it is polled. Main-frame navigations to anything but `start` must also
+/// pass `gate` (for a crawl, robots.txt).
 ///
 /// Interception stays enabled after the guard stops: `Fetch.disable` would
 /// continue requests still paused, and only the guard may decide those.
@@ -207,7 +209,15 @@ async fn guard_requests<'a>(
     reach: Reach,
     browser: &'a Browser,
     main_frame: FrameId,
-) -> Result<(impl Future<Output = ()> + 'a, Arc<Mutex<Option<Refusal>>>), RenderError> {
+    start: Url,
+    gate: &'a dyn HopGate,
+) -> Result<
+    (
+        impl Future<Output = ()> + 'a,
+        Arc<Mutex<Option<RenderError>>>,
+    ),
+    RenderError,
+> {
     let pattern = RequestPattern::builder().url_pattern("*").build();
     let enable = EnableParams::builder()
         .patterns(vec![pattern])
@@ -229,24 +239,32 @@ async fn guard_requests<'a>(
         let mut resolved = HashMap::new();
         while let Some(event) = events.next().await {
             let request_id = event.request_id.clone();
+            let page_navigation =
+                event.resource_type == CdpResourceType::Document && event.frame_id == main_frame;
+            let refusal = if filter.should_block(event.resource_type.as_ref()) {
+                None
+            } else if let Some(refusal) =
+                refusal_for(reach, &event.request.url, &mut resolved).await
+            {
+                tracing::info!(url = %loggable_url(&event.request.url), %refusal, "render request refused");
+                Some(RenderError::Refused(refusal))
+            } else if page_navigation {
+                navigation_refusal(&event.request.url, &start, gate).await
+            } else {
+                None
+            };
+            if let (Some(refusal), true) = (&refusal, page_navigation) {
+                recorded_refusal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_or_insert_with(|| refusal.clone());
+            }
             let verdict = if filter.should_block(event.resource_type.as_ref()) {
                 Err(ErrorReason::BlockedByClient)
+            } else if refusal.is_some() {
+                Err(ErrorReason::AccessDenied)
             } else {
-                match refusal_for(reach, &event.request.url, &mut resolved).await {
-                    None => Ok(()),
-                    Some(refusal) => {
-                        tracing::info!(url = %loggable_url(&event.request.url), %refusal, "render request refused");
-                        if event.resource_type == CdpResourceType::Document
-                            && event.frame_id == main_frame
-                        {
-                            recorded_refusal
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .get_or_insert(refusal);
-                        }
-                        Err(ErrorReason::AccessDenied)
-                    }
-                }
+                Ok(())
             };
             let answered = match verdict {
                 Ok(()) => browser
@@ -264,6 +282,25 @@ async fn guard_requests<'a>(
         }
     };
     Ok((guard, document_refusal))
+}
+
+/// Whether `gate` refuses a navigation of the page's main frame; the page's
+/// own URL was approved before the render started.
+async fn navigation_refusal(
+    request_url: &str,
+    start: &Url,
+    gate: &dyn HopGate,
+) -> Option<RenderError> {
+    let Ok(mut url) = Url::parse(request_url) else {
+        return Some(RenderError::Refused(Refusal::MissingHost));
+    };
+    url.set_fragment(None);
+    let mut start = start.clone();
+    start.set_fragment(None);
+    if url == start {
+        return None;
+    }
+    gate.allow(&url).await.err().map(RenderError::HopRefused)
 }
 
 /// Closes every page in `browser` except `keep`: the popups and tabs a
@@ -289,6 +326,7 @@ impl StygianRenderer {
         browser: &Browser,
         page: &mut PageHandle,
         url: &Url,
+        gate: &dyn HopGate,
     ) -> Result<RenderedPage, RenderError> {
         let main_frame = page
             .inner()
@@ -296,7 +334,8 @@ impl StygianRenderer {
             .await
             .map_err(|error| RenderError::Browser(error.to_string()))?
             .ok_or_else(|| RenderError::Browser("the page has no main frame".to_string()))?;
-        let (guard, document_refusal) = guard_requests(self.reach, browser, main_frame).await?;
+        let (guard, document_refusal) =
+            guard_requests(self.reach, browser, main_frame, url.clone(), gate).await?;
         let page_target = page.inner().target_id().clone();
         let read = async {
             page.inner()
@@ -315,7 +354,7 @@ impl StygianRenderer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
             {
-                return Err(RenderError::Refused(refusal));
+                return Err(refusal);
             }
             let final_url = page
                 .url()
@@ -366,7 +405,7 @@ impl StygianRenderer {
 
 #[async_trait]
 impl Renderer for StygianRenderer {
-    async fn render(&self, url: &Url) -> Result<RenderedPage, RenderError> {
+    async fn render(&self, url: &Url, gate: &dyn HopGate) -> Result<RenderedPage, RenderError> {
         self.reach.check_url(url).map_err(RenderError::Refused)?;
         let pool = self.pool().await?;
         let handle = pool
@@ -385,7 +424,7 @@ impl Renderer for StygianRenderer {
                 .execute(ClearBrowserCookiesParams::default())
                 .await
                 .map_err(|error| RenderError::Browser(format!("clearing cookies: {error}")))?;
-            let rendered = self.render_on(browser.browser(), &mut page, url).await;
+            let rendered = self.render_on(browser.browser(), &mut page, url, gate).await;
             // Hygiene only: the next page clears cookies before it loads.
             if let Err(error) = page.inner().execute(ClearBrowserCookiesParams::default()).await {
                 tracing::warn!(error = %error, "could not clear the browser's cookies after a page");
@@ -417,6 +456,21 @@ mod tests {
     use super::{Reach, StygianRenderer};
     use crate::address_policy::Refusal;
     use crate::extract::{RenderError, Renderer};
+    use crate::fetch::{AnyHop, HopGate};
+
+    /// Refuses `GATED_PATH`, as robots.txt would.
+    struct RefuseGated;
+
+    #[async_trait::async_trait]
+    impl HopGate for RefuseGated {
+        async fn allow(&self, url: &Url) -> Result<(), String> {
+            if url.path() == GATED_PATH {
+                Err("disallowed by robots.txt".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     /// A page that tries every way of opening a new browsing context onto a
     /// private path.
@@ -430,6 +484,9 @@ mod tests {
 </script></main></body></html>"#;
     /// Answers with a redirect to a private path.
     const REDIRECTING_PATH: &str = "/redirect";
+    /// Answers with a redirect to `GATED_PATH`, which the test's gate refuses.
+    const GATED_REDIRECT_PATH: &str = "/hop";
+    const GATED_PATH: &str = "/gated";
     /// Long enough for a popup that escaped to make its request.
     const SETTLE: Duration = Duration::from_secs(2);
 
@@ -455,6 +512,8 @@ mod tests {
                     .push(path.clone());
                 let response = if path == REDIRECTING_PATH {
                     "HTTP/1.1 302 Found\r\nlocation: /private-redirect\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                } else if path == GATED_REDIRECT_PATH {
+                    format!("HTTP/1.1 302 Found\r\nlocation: {GATED_PATH}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 } else {
                     format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{HOSTILE_PAGE}",
@@ -479,7 +538,7 @@ mod tests {
             ..StygianRenderer::new(1, Duration::from_secs(10))
         };
 
-        let rendered = renderer.render(&url).await;
+        let rendered = renderer.render(&url, &AnyHop).await;
         tokio::time::sleep(SETTLE).await;
 
         assert!(rendered.is_ok(), "the fixture itself renders: {rendered:?}");
@@ -505,7 +564,7 @@ mod tests {
             .join(REDIRECTING_PATH)
             .unwrap_or_else(|error| panic!("redirect URL: {error}"));
 
-        let rendered = renderer.render(&redirecting).await;
+        let rendered = renderer.render(&redirecting, &AnyHop).await;
 
         assert_eq!(
             rendered.map(|page| page.final_url),
@@ -516,5 +575,32 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert_eq!(requested, vec![REDIRECTING_PATH.to_string()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Chrome or Chromium"]
+    async fn a_navigation_the_gate_refuses_is_never_requested() {
+        let (url, requested) = fixture_server().await;
+        let renderer = StygianRenderer {
+            reach: Reach::LoopbackFixture,
+            ..StygianRenderer::new(1, Duration::from_secs(10))
+        };
+        let hop = url
+            .join(GATED_REDIRECT_PATH)
+            .unwrap_or_else(|error| panic!("hop URL: {error}"));
+
+        let rendered = renderer.render(&hop, &RefuseGated).await;
+
+        assert_eq!(
+            rendered.map(|page| page.final_url),
+            Err(RenderError::HopRefused(
+                "disallowed by robots.txt".to_string()
+            ))
+        );
+        let requested = requested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(requested, vec![GATED_REDIRECT_PATH.to_string()]);
     }
 }

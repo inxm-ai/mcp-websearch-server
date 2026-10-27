@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::address_policy::{check_url, loggable_url, Refusal};
 use crate::contract::{ExtractResponse, ExtractedPage, FailedUrl};
-use crate::fetch::{FetchError, HttpFetcher};
+use crate::fetch::{get_following_redirects, AnyHop, FetchError, HopGate, HttpFetcher};
 use crate::html::{links, readable_text};
 
 /// Bytes of a page read; the rest is dropped unread.
@@ -72,6 +72,9 @@ pub enum ExtractFailure {
     Timeout,
     #[error("network error: {0}")]
     Network(String),
+    /// A redirect the caller's rules refused (for a crawl, robots.txt).
+    #[error("{0}")]
+    HopRefused(String),
     #[error("no readable text without rendering, and rendering failed: {0}")]
     RenderFailed(RenderError),
     #[error("not read: at most {MAX_EXTRACT_URLS} URLs per call")]
@@ -84,6 +87,7 @@ impl From<FetchError> for ExtractFailure {
             FetchError::Refused(refusal) => ExtractFailure::Refused(refusal),
             FetchError::Timeout => ExtractFailure::Timeout,
             FetchError::Network(message) => ExtractFailure::Network(message),
+            FetchError::HopRefused(reason) => ExtractFailure::HopRefused(reason),
         }
     }
 }
@@ -148,6 +152,9 @@ pub enum RenderError {
     /// The page itself answered with an error (often bot protection).
     #[error("HTTP status {0}")]
     HttpStatus(u16),
+    /// A navigation the caller's rules refused (for a crawl, robots.txt).
+    #[error("{0}")]
+    HopRefused(String),
     #[error("browser error: {0}")]
     Browser(String),
 }
@@ -155,7 +162,9 @@ pub enum RenderError {
 /// Stage two: loads a page in a browser under the same address policy.
 #[async_trait]
 pub trait Renderer: Send + Sync {
-    async fn render(&self, url: &Url) -> Result<RenderedPage, RenderError>;
+    /// Loads `url`; every other document the page's main frame navigates to
+    /// (a redirect, a script navigation) must pass `gate` first.
+    async fn render(&self, url: &Url, gate: &dyn HopGate) -> Result<RenderedPage, RenderError>;
 }
 
 /// A page read to text, with the links it holds (for crawling).
@@ -182,6 +191,12 @@ impl PageReader {
     /// Reads `url` to text, recording which stage answered on an
     /// `extract.page` span.
     pub async fn read(&self, url: &str) -> Result<Page, ExtractFailure> {
+        self.read_gated(url, &AnyHop).await
+    }
+
+    /// [`read`](Self::read), with every redirect and page navigation also
+    /// passing `gate` before it is requested.
+    pub async fn read_gated(&self, url: &str, gate: &dyn HopGate) -> Result<Page, ExtractFailure> {
         let span = tracing::info_span!(
             "extract.page",
             url.full = %loggable_url(url),
@@ -189,7 +204,10 @@ impl PageReader {
             extract.error = field::Empty,
             extract.render_error = field::Empty,
         );
-        let result = self.read_unrecorded(url).instrument(span.clone()).await;
+        let result = self
+            .read_unrecorded(url, gate)
+            .instrument(span.clone())
+            .await;
         match &result {
             Ok(page) => span.record("extract.stage", page.stage.as_str()),
             Err(failure) => {
@@ -200,11 +218,12 @@ impl PageReader {
         result
     }
 
-    async fn read_unrecorded(&self, url: &str) -> Result<Page, ExtractFailure> {
+    async fn read_unrecorded(&self, url: &str, gate: &dyn HopGate) -> Result<Page, ExtractFailure> {
         let url = Url::parse(url.trim())
             .map_err(|error| ExtractFailure::InvalidUrl(error.to_string()))?;
         check_url(&url).map_err(ExtractFailure::Refused)?;
-        let fetched = self.http.get(&url, MAX_PAGE_BYTES).await?;
+        let fetched =
+            get_following_redirects(self.http.as_ref(), &url, MAX_PAGE_BYTES, gate).await?;
         if !(200..300).contains(&fetched.status) {
             return Err(ExtractFailure::HttpStatus(fetched.status));
         }
@@ -229,7 +248,7 @@ impl PageReader {
                 if !needs_render(&http_page.text) {
                     return Ok(http_page);
                 }
-                self.render_or_keep(http_page).await
+                self.render_or_keep(http_page, gate).await
             }
         }
     }
@@ -237,11 +256,15 @@ impl PageReader {
     /// Stage two for a page HTTP could not read: the rendered page when it
     /// has more text, otherwise whatever HTTP found; no text at all is a
     /// failure.
-    async fn render_or_keep(&self, http_page: Page) -> Result<Page, ExtractFailure> {
+    async fn render_or_keep(
+        &self,
+        http_page: Page,
+        gate: &dyn HopGate,
+    ) -> Result<Page, ExtractFailure> {
         let Some(renderer) = &self.renderer else {
             return non_empty(http_page);
         };
-        match renderer.render(&http_page.url).await {
+        match renderer.render(&http_page.url, gate).await {
             Ok(rendered) => {
                 let text = readable_text(&rendered.html);
                 if text.chars().count() > http_page.text.chars().count() {

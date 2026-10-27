@@ -10,6 +10,7 @@ use mcp_websearch_server::extract::{
     content_kind, extract_urls, needs_render, ContentKind, ExtractStage, PageReader, RenderError,
     RenderedPage, Renderer, MAX_EXTRACT_URLS,
 };
+use mcp_websearch_server::fetch::HopGate;
 use url::Url;
 
 mod common;
@@ -177,7 +178,7 @@ impl ScriptedRenderer {
 
 #[async_trait]
 impl Renderer for ScriptedRenderer {
-    async fn render(&self, url: &Url) -> Result<RenderedPage, RenderError> {
+    async fn render(&self, url: &Url, _gate: &dyn HopGate) -> Result<RenderedPage, RenderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.answer.clone().map(|html| RenderedPage {
             final_url: url.clone(),

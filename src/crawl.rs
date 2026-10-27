@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use regex::Regex;
 use texting_robots::Robot;
 use tokio::time::Instant;
@@ -19,7 +20,7 @@ use url::Url;
 use crate::address_policy::check_url;
 use crate::contract::{ExtractResponse, ExtractedPage, FailedUrl};
 use crate::extract::{ExtractFailure, Page, PageReader};
-use crate::fetch::HttpFetcher;
+use crate::fetch::{get_following_redirects, AnyHop, HopGate, HttpFetcher};
 use crate::model::{parse_yes_no, ChatModel, ModelError, ModelTier};
 
 /// Characters of each page's text returned unless `full_content` is set.
@@ -196,7 +197,7 @@ async fn robots_rules(http: &dyn HttpFetcher, url: &Url) -> RobotsRules {
     robots_url.set_path(ROBOTS_PATH);
     robots_url.set_query(None);
     robots_url.set_fragment(None);
-    match http.get(&robots_url, MAX_ROBOTS_BYTES).await {
+    match get_following_redirects(http, &robots_url, MAX_ROBOTS_BYTES, &AnyHop).await {
         Ok(fetched) if (200..300).contains(&fetched.status) => {
             match Robot::new(ROBOTS_AGENT, &fetched.body) {
                 Ok(robot) => RobotsRules::Rules(robot),
@@ -208,6 +209,64 @@ async fn robots_rules(http: &dyn HttpFetcher, url: &Url) -> RobotsRules {
         }
         Ok(fetched) if (400..500).contains(&fetched.status) => RobotsRules::AllowAll,
         Ok(_) | Err(_) => RobotsRules::DisallowAll,
+    }
+}
+
+/// The crawl's robots.txt rules, fetched once per origin. It is also the
+/// crawl's [`HopGate`], so a redirect or a rendered page's navigation into a
+/// disallowed path is refused before it is requested, not after.
+struct RobotsGate<'a> {
+    http: &'a dyn HttpFetcher,
+    rules: Mutex<HashMap<String, Arc<RobotsRules>>>,
+}
+
+impl<'a> RobotsGate<'a> {
+    fn new(http: &'a dyn HttpFetcher) -> Self {
+        Self {
+            http,
+            rules: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn cached(&self, url: &Url) -> Option<Arc<RobotsRules>> {
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&url.origin().ascii_serialization())
+            .cloned()
+    }
+
+    /// The rules for `url`'s origin, fetching robots.txt on first use.
+    async fn rules_for(&self, url: &Url) -> Arc<RobotsRules> {
+        if let Some(rules) = self.cached(url) {
+            return rules;
+        }
+        let rules = Arc::new(robots_rules(self.http, url).await);
+        self.rules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(url.origin().ascii_serialization(), Arc::clone(&rules));
+        rules
+    }
+}
+
+/// Why robots.txt keeps `url` from being crawled, if it does.
+fn robots_refusal(rules: &RobotsRules, url: &Url) -> Option<&'static str> {
+    match rules {
+        RobotsRules::DisallowAll => Some(ROBOTS_UNAVAILABLE),
+        rules if !rules.allows(url) => Some(ROBOTS_DISALLOWED),
+        _ => None,
+    }
+}
+
+#[async_trait]
+impl HopGate for RobotsGate<'_> {
+    async fn allow(&self, url: &Url) -> Result<(), String> {
+        let rules = self.rules_for(url).await;
+        match robots_refusal(&rules, url) {
+            Some(reason) => Err(reason.to_string()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -319,7 +378,7 @@ impl Crawler {
         };
         let mut seen: HashSet<String> = HashSet::from([start.to_string()]);
         let mut queue: VecDeque<(Url, usize)> = VecDeque::from([(start, 0)]);
-        let mut robots_by_origin: HashMap<String, RobotsRules> = HashMap::new();
+        let robots = RobotsGate::new(self.http.as_ref());
 
         while let Some((url, depth)) = queue.pop_front() {
             if pages_read >= plan.limit {
@@ -336,30 +395,29 @@ impl Crawler {
                 });
                 continue;
             }
-            let origin = url.origin().ascii_serialization();
             let host = url.host_str().unwrap_or_default().to_string();
-            if !robots_by_origin.contains_key(&origin) {
-                let fetched = tokio::time::timeout_at(fetch_deadline, async {
-                    let _host_turn = self.gate.hold(&host).await;
-                    robots_rules(self.http.as_ref(), &url).await
-                })
-                .await;
-                let Ok(rules) = fetched else {
-                    timed_out = true;
-                    failed.push(FailedUrl {
-                        url: url.to_string(),
-                        error: CRAWL_TIMED_OUT.to_string(),
-                    });
-                    break;
-                };
-                robots_by_origin.insert(origin.clone(), rules);
-            }
-            let robots_refusal = match robots_by_origin.get(&origin) {
-                Some(RobotsRules::DisallowAll) => Some(ROBOTS_UNAVAILABLE),
-                Some(rules) if !rules.allows(&url) => Some(ROBOTS_DISALLOWED),
-                _ => None,
+            // Fetch robots.txt for a new origin as this host's turn, within
+            // the deadline; known rules answer at once.
+            let rules = match robots.cached(&url) {
+                Some(rules) => rules,
+                None => {
+                    let fetched = tokio::time::timeout_at(fetch_deadline, async {
+                        let _host_turn = self.gate.hold(&host).await;
+                        robots.rules_for(&url).await
+                    })
+                    .await;
+                    let Ok(rules) = fetched else {
+                        timed_out = true;
+                        failed.push(FailedUrl {
+                            url: url.to_string(),
+                            error: CRAWL_TIMED_OUT.to_string(),
+                        });
+                        break;
+                    };
+                    rules
+                }
             };
-            if let Some(reason) = robots_refusal {
+            if let Some(reason) = robots_refusal(&rules, &url) {
                 failed.push(FailedUrl {
                     url: url.to_string(),
                     error: reason.to_string(),
@@ -370,7 +428,10 @@ impl Crawler {
             pages_read += 1;
             let read = tokio::time::timeout_at(fetch_deadline, async {
                 let _host_turn = self.gate.hold(&host).await;
-                self.reader.read(url.as_str()).await
+                // Redirects and page navigations obey robots.txt too. A hop
+                // to another host fetches that host's robots.txt without
+                // its turn: taking a second host's turn here could deadlock.
+                self.reader.read_gated(url.as_str(), &robots).await
             })
             .await;
             let page = match read {
