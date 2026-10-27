@@ -68,9 +68,11 @@
         --create-namespace
 
     - name: Delete the existing pod to retrigger deployment
-      # A commit tag changes the pod spec, so Helm rolls the pod itself;
-      # :latest needs the restart to be pulled again.
-      when: not (extra_docker_image_tag | default('', true))
+      # A commit tag (the 40-character SHA) changes the pod spec, so Helm
+      # rolls the pod itself. A mutable tag (none, or an explicit latest, as
+      # lz-aws 004-deploy-single-docker-service passes) leaves the spec as it
+      # was, so the pod must restart to pull the image again.
+      when: not (extra_docker_image_tag | default('', true) is match('^[0-9a-f]{40}$'))
       command: >
         kubectl rollout restart deployment/mcp-websearch-server -n orchestrator
         --kubeconfig {{ kubeconfig_path | default('/home/runner/.kube/config') }}
