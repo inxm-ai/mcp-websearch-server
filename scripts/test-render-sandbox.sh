@@ -5,8 +5,10 @@
 # capabilities dropped, no privilege escalation, seccomp Unconfined while
 # render.enabled), and fails unless:
 #
-#   1. https://inxm.ai, whose HTML holds no readable text, comes back with
-#      text, which only a render produces;
+#   1. https://inxm.ai, a JavaScript app, comes back with at least 1,000
+#      characters more text than the same image returns with rendering off
+#      (measured in the same run, so a change to the site's static HTML
+#      cannot pass or fail this silently);
 #   2. every Chromium renderer that ran was sandboxed: the image's user, in
 #      its own user namespace, under a seccomp filter, with no-new-privileges
 #      and without --no-sandbox;
@@ -24,8 +26,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_PORT=8000
 BASE_PATH=/api/mcp-websearch-server
 JS_PAGE=https://inxm.ai
-# inxm.ai's HTML holds a "Skip to content" link and nothing else readable.
-MIN_RENDERED_CHARS=1000
+# Text a render must add over the HTTP-only answer.
+MIN_RENDER_GAIN_CHARS=1000
 STARTUP_TIMEOUT_SECONDS=60
 EXTRACT_TIMEOUT_SECONDS=120
 # Mirrors the chart's securityContext; keep the two in step.
@@ -42,21 +44,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Starts the image with `$@` as extra docker options and prints its base URL.
+# Starts the image with rendering `$1` (true/false) and `${@:2}` as extra
+# docker options; sets CONTAINER and BASE_URL. Runs in this shell, not a
+# subshell, so cleanup sees every container it starts.
 start() {
-  local container port
-  container="$(docker run --detach --publish "127.0.0.1:0:${BRIDGE_PORT}" "${CHART_SECURITY[@]}" "$@" \
+  local render="$1" port deadline
+  shift
+  CONTAINER="$(docker run --detach --publish "127.0.0.1:0:${BRIDGE_PORT}" "${CHART_SECURITY[@]}" "$@" \
     --env MCP_SERVER_COMMAND=/usr/local/bin/mcp-websearch --env MCP_BASE_PATH="${BASE_PATH}" \
-    --env RENDER_ENABLED=true --env RENDER_POOL_SIZE=1 --env RENDER_TIMEOUT_SECS=30 "${IMAGE}")"
-  CONTAINERS+=("${container}")
-  port="$(docker port "${container}" "${BRIDGE_PORT}" | head -1 | rev | cut -d: -f1 | rev)"
-  local base="http://127.0.0.1:${port}${BASE_PATH}"
-  local deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
-  until curl --silent --fail --max-time 5 "${base}/healthz/child" >/dev/null; do
-    [ "${SECONDS}" -lt "${deadline}" ] || { docker logs --tail 100 "${container}" >&2; fail "the server did not start"; }
+    --env RENDER_ENABLED="${render}" --env RENDER_POOL_SIZE=1 --env RENDER_TIMEOUT_SECS=30 "${IMAGE}")"
+  CONTAINERS+=("${CONTAINER}")
+  port="$(docker port "${CONTAINER}" "${BRIDGE_PORT}" | head -1 | rev | cut -d: -f1 | rev)"
+  BASE_URL="http://127.0.0.1:${port}${BASE_PATH}"
+  deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+  until curl --silent --fail --max-time 5 "${BASE_URL}/healthz/child" >/dev/null; do
+    [ "${SECONDS}" -lt "${deadline}" ] || { docker logs --tail 100 "${CONTAINER}" >&2; fail "the server did not start"; }
     sleep 2
   done
-  printf '%s %s\n' "${container}" "${base}"
+}
+
+# Calls `extract` on JS_PAGE in the current container, saving the answer to `$1`.
+extract_js_page() {
+  curl --silent --max-time "${EXTRACT_TIMEOUT_SECONDS}" -X POST -H 'content-type: application/json' \
+    -d "{\"urls\": [\"${JS_PAGE}\"]}" "${BASE_URL}/tools/extract" > "$1" \
+    || fail "extract did not answer"
 }
 
 # Characters of text `extract` returned for JS_PAGE.
@@ -69,11 +80,17 @@ print(sum(len(page["text"]) for page in pages if page["url"] == sys.argv[2]))
 PY
 }
 
+# --- baseline: what plain HTTP returns ---------------------------------------
+start false
+extract_js_page "${WORK_DIR}/http-only.json"
+BASELINE="$(extracted_chars "${WORK_DIR}/http-only.json")"
+MIN_RENDERED_CHARS=$((BASELINE + MIN_RENDER_GAIN_CHARS))
+log "${JS_PAGE} over plain HTTP: ${BASELINE} chars"
+
 # --- 1 and 2: the chart's settings render, and every renderer is sandboxed --
-read -r CONTAINER BASE_URL < <(start "${SANDBOX_SECCOMP[@]}")
+start true "${SANDBOX_SECCOMP[@]}"
 log "rendering ${JS_PAGE} in ${CONTAINER:0:12}"
-curl --silent --max-time "${EXTRACT_TIMEOUT_SECONDS}" -X POST -H 'content-type: application/json' \
-  -d "{\"urls\": [\"${JS_PAGE}\"]}" "${BASE_URL}/tools/extract" > "${WORK_DIR}/sandboxed.json" &
+extract_js_page "${WORK_DIR}/sandboxed.json" &
 EXTRACT_PID=$!
 : > "${WORK_DIR}/renderers.txt"
 while kill -0 "${EXTRACT_PID}" 2>/dev/null; do
@@ -91,7 +108,7 @@ while kill -0 "${EXTRACT_PID}" 2>/dev/null; do
 done
 wait "${EXTRACT_PID}" || fail "extract did not answer"
 CHARS="$(extracted_chars "${WORK_DIR}/sandboxed.json")"
-[ "${CHARS}" -ge "${MIN_RENDERED_CHARS}" ] || fail "${JS_PAGE} was not rendered (${CHARS} chars): $(head -c 600 "${WORK_DIR}/sandboxed.json")"
+[ "${CHARS}" -ge "${MIN_RENDERED_CHARS}" ] || fail "${JS_PAGE} was not rendered: ${CHARS} chars against ${BASELINE} over plain HTTP. If no renderer was seen, the page's static HTML now holds enough text that the server does not render it; point JS_PAGE at a page that only has text after JavaScript runs. Answer: $(head -c 600 "${WORK_DIR}/sandboxed.json")"
 [ -s "${WORK_DIR}/renderers.txt" ] || fail "no Chromium renderer was seen while rendering"
 EXPECTED_UID="$(docker exec "${CONTAINER}" id -u)"
 UNSANDBOXED="$(sort -u "${WORK_DIR}/renderers.txt" | grep -v -E "uid=${EXPECTED_UID} seccomp=2 nnp=1 ownns=yes nosandbox=0$" || true)"
@@ -100,10 +117,8 @@ ${UNSANDBOXED}"
 log "ok: ${JS_PAGE} rendered (${CHARS} chars); $(sort -u -t' ' -k1,1 "${WORK_DIR}/renderers.txt" | wc -l | tr -d ' ') renderer(s) sandboxed (uid ${EXPECTED_UID}, own user namespace, seccomp filter, no-new-privileges)"
 
 # --- 3: without the sandbox's syscalls, nothing renders -----------------------
-read -r CONTAINER BASE_URL < <(start)
-curl --silent --max-time "${EXTRACT_TIMEOUT_SECONDS}" -X POST -H 'content-type: application/json' \
-  -d "{\"urls\": [\"${JS_PAGE}\"]}" "${BASE_URL}/tools/extract" > "${WORK_DIR}/default-seccomp.json" \
-  || fail "extract did not answer under the default seccomp profile"
+start true
+extract_js_page "${WORK_DIR}/default-seccomp.json"
 CHARS="$(extracted_chars "${WORK_DIR}/default-seccomp.json")"
 [ "${CHARS}" -lt "${MIN_RENDERED_CHARS}" ] || fail "${JS_PAGE} rendered under the default seccomp profile (${CHARS} chars): Chromium ran without its sandbox"
-log "ok: under the default seccomp profile Chromium does not start (${CHARS} chars, HTTP text only)"
+log "ok: under the default seccomp profile Chromium does not start (${CHARS} chars, the HTTP text)"
