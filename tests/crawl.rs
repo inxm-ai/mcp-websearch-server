@@ -711,3 +711,55 @@ async fn pages_are_cut_as_they_are_read_so_the_budget_counts_only_returned_text(
         .iter()
         .all(|page| page.text.len() == TRUNCATED_TEXT_CHARS));
 }
+
+#[tokio::test]
+async fn cut_pages_keep_no_more_memory_than_the_text_they_return() {
+    let huge = "x".repeat(1024 * 1024);
+    let (crawler, _, _) = crawler(
+        ScriptedHttp::new(&[
+            ("https://huge.example/robots.txt", 404, HTML, ""),
+            (
+                "https://huge.example/",
+                200,
+                HTML,
+                &text_page(&huge, &["/two", "/three"]),
+            ),
+            (
+                "https://huge.example/two",
+                200,
+                HTML,
+                &text_page(&huge, &[]),
+            ),
+            (
+                "https://huge.example/three",
+                200,
+                HTML,
+                &text_page(&huge, &[]),
+            ),
+        ]),
+        ScriptedModel::new(&[]),
+    );
+
+    let outcome = crawler
+        .crawl(&plan("https://huge.example/"), far_deadline())
+        .await;
+
+    assert_eq!(outcome.response.extracted.len(), 3);
+    let held: usize = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| page.text.capacity())
+        .sum();
+    let returned: usize = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| page.text.len())
+        .sum();
+    assert_eq!(returned, 3 * TRUNCATED_TEXT_CHARS);
+    assert_eq!(
+        held, returned,
+        "cut pages still hold their original allocation"
+    );
+}

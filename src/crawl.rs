@@ -496,7 +496,12 @@ impl Crawler {
             let budget_left = plan.text_budget_bytes.saturating_sub(kept_bytes);
             text_budget_spent = text.len() >= budget_left;
             keep_bytes(&mut text, budget_left);
-            kept_bytes += text.len();
+            // Cutting keeps the original buffer; copy the kept text into one
+            // of its own size, and count what stays allocated.
+            if text.capacity() > text.len() {
+                text = text.as_str().to_owned();
+            }
+            kept_bytes += text.capacity();
             if !text_budget_spent && depth < plan.max_depth {
                 // The frontier never holds more than the pages left to read.
                 let room = plan.limit.saturating_sub(pages_read + queue.len());
