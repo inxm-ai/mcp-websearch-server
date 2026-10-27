@@ -207,3 +207,42 @@ pub struct CrawlCompanyRequest {
     #[serde(default = "default_company_limit")]
     pub limit: u32,
 }
+
+/// How much research `web_research` does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ResearchModel {
+    /// Fast model; up to 3 searches and 8 sources.
+    #[default]
+    Mini,
+    /// Default model; up to 6 searches and 16 sources.
+    Pro,
+    /// Same as `mini`.
+    Auto,
+}
+
+/// Arguments for `web_research`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ResearchRequest {
+    /// The research question or topic.
+    pub input: String,
+    /// `mini` (default) or `pro` for twice the searches and sources.
+    #[serde(default)]
+    pub model: Option<ResearchModel>,
+}
+
+/// A source the report cites; every one was read successfully.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResearchSource {
+    pub url: String,
+    pub title: String,
+    pub favicon: Option<String>,
+}
+
+/// Result of `web_research`: a markdown report and the sources it cites as
+/// `[n]`, numbered in this order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResearchResult {
+    pub content: String,
+    pub sources: Vec<ResearchSource>,
+}

@@ -6,16 +6,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
-    tool, tool_handler, tool_router, ServerHandler,
+    model::{ProgressNotificationParam, ProgressToken, RequestMetaObject},
+    tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
 };
 use tracing::{field, Instrument};
 
 use crate::config::Config;
 use crate::contract::{
     CrawlCompanyRequest, CrawlRequest, DownloadRequest, DownloadedFile, ExtractRequest,
-    ExtractResponse, SearchRequest, SearchResponse,
+    ExtractResponse, ResearchRequest, ResearchResult, SearchRequest, SearchResponse,
 };
 use crate::crawl::{
     compile_path_patterns, crawl_timeout, CrawlOutcome, CrawlPlan, Crawler, HostGate,
@@ -28,6 +30,7 @@ use crate::http_fetch_adapter::ReqwestFetcher;
 use crate::llm_adapter::{TgiChatModel, UnconfiguredModel};
 use crate::model::ChatModel;
 use crate::render_adapter::StygianRenderer;
+use crate::research::{Phase, ProgressSink, Researcher};
 use crate::search::{run_search, SearchCache, SearchEngine, CACHE_TTL};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
@@ -45,6 +48,30 @@ pub struct WebSearch {
     http: Arc<dyn HttpFetcher>,
     page_reader: Arc<PageReader>,
     crawler: Arc<Crawler>,
+    researcher: Arc<Researcher>,
+}
+
+/// Reports research phases as MCP progress notifications, when the caller
+/// asked for progress.
+struct PeerProgress {
+    peer: Peer<RoleServer>,
+    token: Option<ProgressToken>,
+}
+
+#[async_trait]
+impl ProgressSink for PeerProgress {
+    async fn phase(&self, phase: Phase) {
+        tracing::info!(phase = phase.as_str(), "web research phase");
+        let Some(token) = &self.token else {
+            return;
+        };
+        let notification = ProgressNotificationParam::new(token.clone(), f64::from(phase.step()))
+            .with_total(f64::from(Phase::COUNT))
+            .with_message(phase.as_str());
+        if let Err(error) = self.peer.notify_progress(notification).await {
+            tracing::debug!(error = %error, "could not send a progress notification");
+        }
+    }
 }
 
 /// A caller's count argument as a bound of at least 1.
@@ -85,15 +112,24 @@ impl WebSearch {
             None => Arc::new(UnconfiguredModel),
         };
         let page_reader = Arc::new(PageReader::new(http.clone(), renderer));
+        let search_engine: Arc<dyn SearchEngine> =
+            Arc::new(SearxngClient::new(&config.searxng_url)?);
+        let search_cache = Arc::new(SearchCache::new(CACHE_TTL));
         Ok(Self {
             crawler: Arc::new(Crawler {
                 reader: page_reader.clone(),
                 http: http.clone(),
-                model,
+                model: model.clone(),
                 gate: Arc::new(HostGate::default()),
             }),
-            search_engine: Arc::new(SearxngClient::new(&config.searxng_url)?),
-            search_cache: Arc::new(SearchCache::new(CACHE_TTL)),
+            researcher: Arc::new(Researcher {
+                search_engine: search_engine.clone(),
+                search_cache: search_cache.clone(),
+                reader: page_reader.clone(),
+                model,
+            }),
+            search_engine,
+            search_cache,
             page_reader,
             http,
         })
@@ -245,6 +281,47 @@ impl WebSearch {
             limit: at_least_one(request.limit),
         };
         Ok(Json(run_crawl(&self.crawler, plan, &span).await))
+    }
+
+    /// Research a topic: search, read the best sources, write a report.
+    #[tool(
+        description = "An advanced research agent that performs comprehensive research on a given topic by conducting multiple searches, reading the best sources, and writing a detailed markdown report. The report cites only sources that were read, as [n] numbered like `sources`. `model`: \"mini\" (default; up to 3 searches and 8 sources) or \"pro\" (a larger model, up to 6 searches and 16 sources). Reports progress as it goes: searching, reading, writing.\n\nIMPORTANT: For anything that requires in-depth information gathering, data synthesis, or extensive analysis of a topic, prefer this tool over search or extraction tools.\n\nExamples:\n{\"input\": \"Comprehensive overview of the latest advancements in renewable energy technologies.\"}\n{\"input\": \"In-depth analysis of the impact of artificial intelligence on modern healthcare systems and patient care.\"}",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn web_research(
+        &self,
+        peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
+        Parameters(request): Parameters<ResearchRequest>,
+    ) -> Result<Json<ResearchResult>, ToolFailure> {
+        let span = tracing::info_span!(
+            "tool.web_research",
+            tool.latency_ms = field::Empty,
+            research.model = field::Empty,
+            research.source_count = field::Empty,
+        );
+        let model = request.model.unwrap_or_default();
+        span.record("research.model", format!("{model:?}").to_lowercase());
+        let progress = PeerProgress {
+            peer,
+            token: meta.get_progress_token(),
+        };
+        let started = Instant::now();
+        let result = self
+            .researcher
+            .research(&request.input, model, &progress)
+            .instrument(span.clone())
+            .await;
+        record_latency(&span, started);
+        let result = result.map_err(|failure| {
+            ToolFailure::new(FailureKind::UpstreamFailed, failure.to_string())
+        })?;
+        span.record("research.source_count", result.sources.len());
+        Ok(Json(result))
     }
 }
 

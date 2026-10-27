@@ -17,6 +17,7 @@ pub mod http_fetch_adapter;
 pub mod llm_adapter;
 pub mod model;
 pub mod render_adapter;
+pub mod research;
 pub mod search;
 pub mod searxng_adapter;
 pub mod server;
