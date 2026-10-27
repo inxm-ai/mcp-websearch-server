@@ -1,7 +1,6 @@
 //! `extract` and `download_file` over a scripted HTTP fetcher: the
 //! needs-render decision, content types, failures and result shape.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -11,48 +10,14 @@ use mcp_websearch_server::extract::{
     content_kind, extract_urls, needs_render, ContentKind, ExtractStage, PageReader, RenderError,
     RenderedPage, Renderer,
 };
-use mcp_websearch_server::fetch::{FetchError, FetchedBody, HttpFetcher};
 use url::Url;
+
+mod common;
+use common::ScriptedHttp;
 
 const PROSE: &str = "The quarterly report shows revenue growth across every region, driven by \
     new enterprise contracts and a strong renewal rate. Management expects the trend to \
     continue into next year as the product line expands into adjacent markets.";
-
-/// Answers each URL from a fixed table; unknown URLs time out.
-struct ScriptedHttp {
-    pages: HashMap<String, (u16, &'static str, Vec<u8>)>,
-}
-
-impl ScriptedHttp {
-    fn new(pages: &[(&str, u16, &'static str, &str)]) -> Self {
-        Self {
-            pages: pages
-                .iter()
-                .map(|(url, status, content_type, body)| {
-                    (
-                        url.to_string(),
-                        (*status, *content_type, body.as_bytes().to_vec()),
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
-#[async_trait]
-impl HttpFetcher for ScriptedHttp {
-    async fn get(&self, url: &Url, max_bytes: usize) -> Result<FetchedBody, FetchError> {
-        let (status, content_type, body) =
-            self.pages.get(url.as_str()).ok_or(FetchError::Timeout)?;
-        Ok(FetchedBody {
-            final_url: url.clone(),
-            status: *status,
-            content_type: content_type.to_string(),
-            body: body.iter().copied().take(max_bytes).collect(),
-            truncated: body.len() > max_bytes,
-        })
-    }
-}
 
 #[test]
 fn short_boilerplate_or_script_shells_need_rendering() {

@@ -128,3 +128,82 @@ pub struct DownloadedFile {
     /// The file's MIME type as the server sent it.
     pub content_type: String,
 }
+
+fn default_crawl_breadth() -> u32 {
+    10
+}
+
+fn default_crawl_depth() -> u32 {
+    2
+}
+
+/// Arguments for `crawl`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CrawlRequest {
+    /// Absolute http(s) URL the crawl starts from.
+    pub start_url: String,
+    /// What the crawl is looking for; pages a model judges irrelevant to it
+    /// are left out.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Accepted for compatibility; not used.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Return each page's full text instead of its first 5,000 characters.
+    #[serde(default)]
+    pub full_content: bool,
+    /// Most links followed from each page (at least 1).
+    #[serde(default = "default_crawl_breadth")]
+    pub max_breadth: u32,
+    /// How many links deep to go from the start page (at least 1).
+    #[serde(default = "default_crawl_depth")]
+    pub max_depth: u32,
+    /// Accepted for compatibility; pages are always read in full fidelity.
+    #[serde(default)]
+    pub extract_depth: Option<String>,
+}
+
+fn default_company_breadth() -> u32 {
+    20
+}
+
+fn default_company_depth() -> u32 {
+    1
+}
+
+fn default_company_limit() -> u32 {
+    50
+}
+
+/// Arguments for `crawl_company_website`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CrawlCompanyRequest {
+    /// The company's website, e.g. "https://inxm.ai".
+    pub url: String,
+    /// What the crawl is looking for; pages a model judges irrelevant to it
+    /// are left out.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Regexes on the URL path; when given, only matching pages are
+    /// followed, e.g. ["/about.*", "/pricing.*"].
+    #[serde(default)]
+    pub select_paths: Option<Vec<String>>,
+    /// Regexes on the URL path; matching pages are not followed.
+    #[serde(default)]
+    pub exclude_paths: Option<Vec<String>>,
+    /// Follow links to other sites too.
+    #[serde(default)]
+    pub allow_external: bool,
+    /// Return each page's full text instead of its first 5,000 characters.
+    #[serde(default)]
+    pub full_content: bool,
+    /// Most links followed from each page (at least 1).
+    #[serde(default = "default_company_breadth")]
+    pub max_breadth: u32,
+    /// How many links deep to go from the start page (at least 1).
+    #[serde(default = "default_company_depth")]
+    pub max_depth: u32,
+    /// Most pages read (at least 1).
+    #[serde(default = "default_company_limit")]
+    pub limit: u32,
+}
