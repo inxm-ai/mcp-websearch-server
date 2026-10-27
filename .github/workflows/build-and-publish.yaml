@@ -1,24 +1,22 @@
 name: Build and publish
 
 # Runs this repo's checks (ci.yaml and harness.yaml), builds the
-# mcp-websearch-server image once and packages its chart, then publishes that
-# one build everywhere, so every registry holds the same image digest:
+# mcp-websearch-server image once and packages its chart, then publishes both
+# to GHCR with this run's GITHUB_TOKEN:
 #
-#   push-ghcr  ghcr.io/inxm-ai/mcp-websearch-server, with this run's
-#              GITHUB_TOKEN; tagged like enterprise-mcp-bridge: latest and
-#              sha-<short sha> on main, <tag> on a tag push.
-#   push-acr   inxm-ai/lz-azure push-to-acr.yml: image and chart to acrinxmai,
-#   push-ecr   inxm-ai/lz-aws push-to-ecr.yml: image and chart to ECR,
-#              both as :<git sha> and :latest (inxm-ai/lz-infra#55; those are
-#              the registries lz-infra's deploy reads). They sign in as this
-#              repo's own publish identity and role, which lz-infra's
-#              publisher list (config/publishers.yaml) sets up. Until that
-#              onboarding has run, PUBLISH_ARTIFACTS is unset and both skip.
+#   image  ghcr.io/inxm-ai/mcp-websearch-server, tagged like
+#          enterprise-mcp-bridge: latest and sha-<short sha> on main, <tag> on
+#          a tag push. Copied from the build's archive with its digest kept.
+#   chart  oci://ghcr.io/inxm-ai/charts/mcp-websearch-server at its Chart.yaml
+#          version, from main only.
 #
-# Nothing here deploys, and no token beyond GITHUB_TOKEN and OIDC is used:
-# this repo is public, so org secrets such as GH_DEPLOY_TOKEN never reach it.
-# QA deploys through lz-aws 004 (run by hand), which pins this commit's ECR
-# image; Azure clusters pick up ACR's :latest on their next update.
+# ACR and ECR, which lz-infra's deploy reads, get their copies from
+# infrastructure-owned workflows, as enterprise-mcp-bridge's do: lz-azure and
+# lz-aws "002-4 Sync mcp-websearch-server" copy the image (same digest) and
+# the chart from GHCR. This repo is public, so it can neither call their
+# internal reusable workflows (push-to-acr.yml, push-to-ecr.yml) nor read org
+# secrets such as GH_DEPLOY_TOKEN; it publishes with GITHUB_TOKEN only and
+# deploys nothing.
 #
 # Pull requests run ci.yaml and harness.yaml on their own.
 
@@ -91,7 +89,7 @@ jobs:
       - name: Package chart
         run: helm package infra/helm --destination dist/chart
 
-      # The push jobs download them by these names.
+      # push-ghcr downloads them by these names.
       - name: Upload chart
         uses: actions/upload-artifact@v7
         with:
@@ -157,29 +155,26 @@ jobs:
             echo "| \`${target}\` | \`${pushed}\` |" >> "${GITHUB_STEP_SUMMARY}"
           done <<<"${TAGS}"
 
-  # ACR_PUBLISH_CLIENT_ID and PUBLISH_ARTIFACTS are set by lz-infra's
-  # onboarding, PUBLISH_ARTIFACTS last, once both clouds are set up.
-  push-acr:
-    name: Push to ACR
-    needs: build
-    if: ${{ github.ref == 'refs/heads/main' && vars.PUBLISH_ARTIFACTS != '' }}
-    permissions:
-      id-token: write
-    uses: inxm-ai/lz-azure/.github/workflows/push-to-acr.yml@main
-    with:
-      azure-client-id: ${{ vars.ACR_PUBLISH_CLIENT_ID }}
-      chart-artifact: chart
-      image-artifact: image
-      image-name: mcp-websearch-server
+      - name: Download chart
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: chart
+          path: chart
 
-  push-ecr:
-    name: Push to ECR
-    needs: build
-    if: ${{ github.ref == 'refs/heads/main' && vars.PUBLISH_ARTIFACTS != '' }}
-    permissions:
-      id-token: write
-    uses: inxm-ai/lz-aws/.github/workflows/push-to-ecr.yml@main
-    with:
-      chart-artifact: chart
-      image-artifact: image
-      image-name: mcp-websearch-server
+      - uses: azure/setup-helm@v5
+        if: ${{ github.ref == 'refs/heads/main' }}
+        with:
+          version: v3.14.4
+
+      # The sync workflows pull it from here at the version in the
+      # Chart.yaml of the commit they copy.
+      - name: Push chart
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+        run: |
+          set -euo pipefail
+          helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin <<<"${GH_TOKEN}"
+          helm push chart/*.tgz "${CHART_REGISTRY}"
