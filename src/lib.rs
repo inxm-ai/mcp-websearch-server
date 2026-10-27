@@ -21,4 +21,5 @@ pub mod research;
 pub mod search;
 pub mod searxng_adapter;
 pub mod server;
+pub mod telemetry_adapter;
 pub mod tool_failure;

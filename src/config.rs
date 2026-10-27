@@ -29,6 +29,8 @@ pub struct Config {
     /// fail as not configured.
     pub tgi_url: Option<Url>,
     pub default_model: String,
+    /// The OTel collector's OTLP/gRPC endpoint; no export when unset.
+    pub otlp_endpoint: Option<String>,
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -71,6 +73,10 @@ impl Config {
                 })
                 .transpose()?,
             default_model: env_or("DEFAULT_MODEL", DEFAULT_MODEL),
+            otlp_endpoint: std::env::var("OTLP_ENDPOINT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         })
     }
 }
