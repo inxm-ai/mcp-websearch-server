@@ -22,8 +22,8 @@ use crate::contract::{
     SocialMediaRequest, SocialMediaSearchResults,
 };
 use crate::crawl::{
-    compile_path_patterns, crawl_timeout, CrawlOutcome, CrawlPlan, Crawler, HostGate,
-    DEFAULT_CRAWL_LIMIT,
+    bounded_count, compile_path_patterns, crawl_timeout, CrawlOutcome, CrawlPlan, Crawler,
+    HostGate, DEFAULT_CRAWL_LIMIT, MAX_CRAWL_BREADTH, MAX_CRAWL_DEPTH, MAX_CRAWL_LIMIT,
 };
 use crate::download::download;
 use crate::extract::{extract_urls, PageReader, Renderer};
@@ -74,11 +74,6 @@ impl ProgressSink for PeerProgress {
             tracing::debug!(error = %error, "could not send a progress notification");
         }
     }
-}
-
-/// A caller's count argument as a bound of at least 1.
-fn at_least_one(value: u32) -> usize {
-    usize::try_from(value.max(1)).unwrap_or(usize::MAX)
 }
 
 /// Runs `plan` and records the crawl's shape on the tool span.
@@ -232,7 +227,7 @@ impl WebSearch {
 
     /// Crawl a site from a start URL, breadth-first, same site only.
     #[tool(
-        description = "Crawl a website starting from a given URL to discover and extract content from multiple pages within the same site. Use this tool when you want to gather comprehensive information from a website, such as articles, blog posts, or documentation spread across various pages. The crawler follows links up to `max_depth` links deep, at most `max_breadth` new links per page and at most 50 pages, honours robots.txt, and returns each page's text (first 5,000 characters unless `full_content`). With `instructions`, pages a model judges irrelevant to them are left out.\n\nExamples:\n{\"start_url\": \"https://inxm.ai\", \"max_breadth\": 5, \"max_depth\": 2}\n{\"start_url\": \"https://example.com/blog\", \"instructions\": \"Find all pages on their Python SDK\", \"max_breadth\": 15, \"max_depth\": 3}\n{\"start_url\": \"https://newswebsite.com\", \"max_breadth\": 20, \"max_depth\": 1}",
+        description = "Crawl a website starting from a given URL to discover and extract content from multiple pages within the same site. Use this tool when you want to gather comprehensive information from a website, such as articles, blog posts, or documentation spread across various pages. The crawler follows links up to `max_depth` links deep (at most 5), at most `max_breadth` new links per page (at most 50) and at most 50 pages within 60–300 seconds, honours robots.txt, and returns each page's text (first 5,000 characters unless `full_content`). With `instructions`, pages a model judges irrelevant to them are left out.\n\nExamples:\n{\"start_url\": \"https://inxm.ai\", \"max_breadth\": 5, \"max_depth\": 2}\n{\"start_url\": \"https://example.com/blog\", \"instructions\": \"Find all pages on their Python SDK\", \"max_breadth\": 15, \"max_depth\": 3}\n{\"start_url\": \"https://newswebsite.com\", \"max_breadth\": 20, \"max_depth\": 1}",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn crawl(
@@ -247,8 +242,8 @@ impl WebSearch {
             exclude_paths: Vec::new(),
             allow_external: false,
             full_content: request.full_content,
-            max_breadth: at_least_one(request.max_breadth),
-            max_depth: at_least_one(request.max_depth),
+            max_breadth: bounded_count(request.max_breadth, MAX_CRAWL_BREADTH),
+            max_depth: bounded_count(request.max_depth, MAX_CRAWL_DEPTH),
             limit: DEFAULT_CRAWL_LIMIT,
         };
         Ok(Json(run_crawl(&self.crawler, plan, &span).await))
@@ -256,7 +251,7 @@ impl WebSearch {
 
     /// Crawl a company's own website for business information.
     #[tool(
-        description = "Crawl a company's own website to gather business intelligence such as their products, team, mission, or pricing. Use this tool instead of the generic `crawl` tool when researching a specific company (e.g. competitor analysis, sales prospecting, or due diligence): it stays within the company's site by default and lets you narrow the crawl to specific sections via select_paths and exclude_paths (regex patterns matched against the URL path). Reads at most `limit` pages, honours robots.txt, and returns each page's text (first 5,000 characters unless `full_content`). With `instructions`, pages a model judges irrelevant to them are left out.\n\nExamples:\n{\"url\": \"https://inxm.ai\", \"instructions\": \"Find information about the company's product and team\"}\n{\"url\": \"https://example.com\", \"select_paths\": [\"/about.*\", \"/team.*\", \"/pricing.*\"]}\n{\"url\": \"https://competitor.com\", \"instructions\": \"Summarize their product offering and pricing tiers\", \"max_depth\": 2}",
+        description = "Crawl a company's own website to gather business intelligence such as their products, team, mission, or pricing. Use this tool instead of the generic `crawl` tool when researching a specific company (e.g. competitor analysis, sales prospecting, or due diligence): it stays within the company's site by default and lets you narrow the crawl to specific sections via select_paths and exclude_paths (regex patterns matched against the URL path). Reads at most `limit` pages (at most 200; `max_breadth` at most 50, `max_depth` at most 5) within 60–300 seconds, honours robots.txt, and returns each page's text (first 5,000 characters unless `full_content`). With `instructions`, pages a model judges irrelevant to them are left out.\n\nExamples:\n{\"url\": \"https://inxm.ai\", \"instructions\": \"Find information about the company's product and team\"}\n{\"url\": \"https://example.com\", \"select_paths\": [\"/about.*\", \"/team.*\", \"/pricing.*\"]}\n{\"url\": \"https://competitor.com\", \"instructions\": \"Summarize their product offering and pricing tiers\", \"max_depth\": 2}",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn crawl_company_website(
@@ -276,9 +271,9 @@ impl WebSearch {
                 .map_err(invalid)?,
             allow_external: request.allow_external,
             full_content: request.full_content,
-            max_breadth: at_least_one(request.max_breadth),
-            max_depth: at_least_one(request.max_depth),
-            limit: at_least_one(request.limit),
+            max_breadth: bounded_count(request.max_breadth, MAX_CRAWL_BREADTH),
+            max_depth: bounded_count(request.max_depth, MAX_CRAWL_DEPTH),
+            limit: bounded_count(request.limit, MAX_CRAWL_LIMIT),
         };
         Ok(Json(run_crawl(&self.crawler, plan, &span).await))
     }

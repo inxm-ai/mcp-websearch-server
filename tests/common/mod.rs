@@ -14,6 +14,8 @@ use url::Url;
 /// every URL requested.
 pub struct ScriptedHttp {
     pages: HashMap<String, (u16, String, Vec<u8>)>,
+    /// URL → where its redirect chain ends (served from `pages`).
+    redirects: HashMap<String, String>,
     pub requested: Mutex<Vec<String>>,
 }
 
@@ -29,8 +31,14 @@ impl ScriptedHttp {
                     )
                 })
                 .collect(),
+            redirects: HashMap::new(),
             requested: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn with_redirect(mut self, from: &str, to: &str) -> Self {
+        self.redirects.insert(from.to_string(), to.to_string());
+        self
     }
 
     pub fn requested(&self) -> Vec<String> {
@@ -48,10 +56,18 @@ impl HttpFetcher for ScriptedHttp {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(url.to_string());
-        let (status, content_type, body) =
-            self.pages.get(url.as_str()).ok_or(FetchError::Timeout)?;
+        let final_url = match self.redirects.get(url.as_str()) {
+            Some(target) => {
+                Url::parse(target).map_err(|error| FetchError::Network(error.to_string()))?
+            }
+            None => url.clone(),
+        };
+        let (status, content_type, body) = self
+            .pages
+            .get(final_url.as_str())
+            .ok_or(FetchError::Timeout)?;
         Ok(FetchedBody {
-            final_url: url.clone(),
+            final_url,
             status: *status,
             content_type: content_type.clone(),
             body: body.iter().copied().take(max_bytes).collect(),
@@ -104,5 +120,30 @@ impl ChatModel for ScriptedModel {
             .find(|(needle, _)| prompt.contains(needle.as_str()))
             .map(|(_, answer)| answer.clone())
             .unwrap_or_else(|| Err(ModelError::Malformed("no scripted answer".into())))
+    }
+}
+
+/// Never answers: every request hangs until the caller gives up.
+pub struct StalledHttp;
+
+#[async_trait]
+impl HttpFetcher for StalledHttp {
+    async fn get(&self, _url: &Url, _max_bytes: usize) -> Result<FetchedBody, FetchError> {
+        futures::future::pending().await
+    }
+}
+
+/// Never answers a completion.
+pub struct StalledModel;
+
+#[async_trait]
+impl ChatModel for StalledModel {
+    async fn complete(
+        &self,
+        _tier: ModelTier,
+        _system: &str,
+        _user: &str,
+    ) -> Result<String, ModelError> {
+        futures::future::pending().await
     }
 }

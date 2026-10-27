@@ -6,15 +6,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mcp_websearch_server::crawl::{
-    compile_path_patterns, crawl_timeout, next_links, path_allowed, site_of, CrawlPlan, Crawler,
-    HostGate, TRUNCATED_TEXT_CHARS,
+    bounded_count, compile_path_patterns, crawl_timeout, next_links, path_allowed, site_of,
+    CrawlPlan, Crawler, HostGate, MAX_CRAWL_BREADTH, TRUNCATED_TEXT_CHARS,
 };
 use mcp_websearch_server::extract::PageReader;
+use mcp_websearch_server::fetch::HttpFetcher;
+use mcp_websearch_server::model::ChatModel;
 use mcp_websearch_server::model::{parse_yes_no, strip_reasoning, ModelError, ModelTier};
 use url::Url;
 
 mod common;
-use common::{ScriptedHttp, ScriptedModel};
+use common::{ScriptedHttp, ScriptedModel, StalledHttp, StalledModel};
 
 fn url(text: &str) -> Url {
     Url::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"))
@@ -366,4 +368,99 @@ async fn a_passed_deadline_returns_what_was_read() {
         .await;
     assert!(outcome.timed_out);
     assert!(outcome.response.extracted.is_empty());
+}
+
+#[test]
+fn caller_bounds_are_clamped_between_one_and_the_ceiling() {
+    assert_eq!(bounded_count(0, MAX_CRAWL_BREADTH), 1);
+    assert_eq!(bounded_count(7, MAX_CRAWL_BREADTH), 7);
+    assert_eq!(
+        bounded_count(u32::MAX, MAX_CRAWL_BREADTH),
+        MAX_CRAWL_BREADTH
+    );
+}
+
+#[tokio::test]
+async fn a_start_page_redirecting_elsewhere_does_not_move_the_crawl() {
+    let landing = page("Elsewhere", &["/other-page"]);
+    let (crawler, http, _) = crawler(
+        ScriptedHttp::new(&[
+            ("https://start.example/robots.txt", 404, HTML, ""),
+            ("https://elsewhere.example/", 200, HTML, &landing),
+            (
+                "https://elsewhere.example/other-page",
+                200,
+                HTML,
+                &page("Other", &[]),
+            ),
+        ])
+        .with_redirect("https://start.example/", "https://elsewhere.example/"),
+        ScriptedModel::new(&[]),
+    );
+
+    let outcome = crawler
+        .crawl(&plan("https://start.example/"), far_deadline())
+        .await;
+
+    let urls: Vec<&str> = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| page.url.as_str())
+        .collect();
+    assert_eq!(urls, vec!["https://elsewhere.example/"]);
+    assert!(!http
+        .requested()
+        .contains(&"https://elsewhere.example/other-page".to_string()));
+}
+
+fn stalled_crawler(http: Arc<dyn HttpFetcher>, model: Arc<dyn ChatModel>) -> Crawler {
+    Crawler {
+        reader: Arc::new(PageReader::new(http.clone(), None)),
+        http,
+        model,
+        gate: Arc::new(HostGate::default()),
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_robots_txt_cannot_outlast_the_deadline() {
+    let crawler = stalled_crawler(Arc::new(StalledHttp), Arc::new(ScriptedModel::new(&[])));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        crawler.crawl(&plan("https://slow.example/"), deadline),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the crawl ran past its deadline"));
+
+    assert!(outcome.timed_out);
+    assert_eq!(outcome.response.failed[0].error, "crawl timed out");
+}
+
+#[tokio::test]
+async fn a_stalled_model_leaves_pages_unscored_by_the_deadline() {
+    let http = Arc::new(ScriptedHttp::new(&[
+        ("https://co.example/robots.txt", 404, HTML, ""),
+        ("https://co.example/", 200, HTML, &page("Home", &[])),
+    ]));
+    let crawler = stalled_crawler(http, Arc::new(StalledModel));
+    let scored = CrawlPlan {
+        instructions: Some("pricing".into()),
+        ..plan("https://co.example/")
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), crawler.crawl(&scored, deadline))
+        .await
+        .unwrap_or_else(|_| panic!("scoring ran past the deadline"));
+
+    assert!(outcome.timed_out);
+    assert_eq!(
+        outcome.response.extracted.len(),
+        1,
+        "the unscored page is kept"
+    );
+    assert_eq!(outcome.scoring_failures, 1);
 }

@@ -26,6 +26,12 @@ use crate::model::{parse_yes_no, ChatModel, ModelError, ModelTier};
 pub const TRUNCATED_TEXT_CHARS: usize = 5_000;
 /// Pages read by `crawl`, which has no `limit` argument.
 pub const DEFAULT_CRAWL_LIMIT: usize = 50;
+/// Ceilings on the caller's bounds; larger requests are clamped to them.
+pub const MAX_CRAWL_BREADTH: usize = 50;
+pub const MAX_CRAWL_DEPTH: usize = 5;
+pub const MAX_CRAWL_LIMIT: usize = 200;
+/// With `instructions`, this share of the crawl's time is kept for scoring.
+const SCORING_SHARE_DIVISOR: u32 = 4;
 /// The crawl deadline grows with the pages it may read, between a floor
 /// that lets small crawls finish and a ceiling that bounds a tool call.
 const CRAWL_TIMEOUT_FLOOR: Duration = Duration::from_secs(60);
@@ -85,6 +91,11 @@ pub fn compile_path_patterns(patterns: &[String]) -> Result<Vec<Regex>, CrawlErr
             })
         })
         .collect()
+}
+
+/// A caller's count argument as a bound between 1 and `max`.
+pub fn bounded_count(value: u32, max: usize) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX).clamp(1, max)
 }
 
 /// The wall-clock budget for a crawl of this size.
@@ -227,6 +238,13 @@ pub async fn is_relevant(
     parse_yes_no(&answer).ok_or_else(|| ModelError::Malformed(format!("not yes/no: {answer}")))
 }
 
+/// Whether pages are scored against instructions.
+fn scores_pages(plan: &CrawlPlan) -> bool {
+    plan.instructions
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
 fn to_extracted(page: &Page, full_content: bool) -> ExtractedPage {
     ExtractedPage {
         text: truncate(&page.text, full_content),
@@ -290,16 +308,24 @@ impl Crawler {
                 };
             }
         };
+        // The site is the one the caller named: a start page that redirects
+        // elsewhere does not move the crawl to that other site.
+        let start_site = site_of(&start).unwrap_or_default();
+        let fetch_deadline = if scores_pages(plan) {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            deadline - budget / SCORING_SHARE_DIVISOR
+        } else {
+            deadline
+        };
         let mut seen: HashSet<String> = HashSet::from([start.to_string()]);
         let mut queue: VecDeque<(Url, usize)> = VecDeque::from([(start, 0)]);
         let mut robots_by_origin: HashMap<String, RobotsRules> = HashMap::new();
-        let mut start_site: Option<String> = None;
 
         while let Some((url, depth)) = queue.pop_front() {
             if pages_read >= plan.limit {
                 break;
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= fetch_deadline {
                 timed_out = true;
                 break;
             }
@@ -313,8 +339,19 @@ impl Crawler {
             let origin = url.origin().ascii_serialization();
             let host = url.host_str().unwrap_or_default().to_string();
             if !robots_by_origin.contains_key(&origin) {
-                let _host_turn = self.gate.hold(&host).await;
-                let rules = robots_rules(self.http.as_ref(), &url).await;
+                let fetched = tokio::time::timeout_at(fetch_deadline, async {
+                    let _host_turn = self.gate.hold(&host).await;
+                    robots_rules(self.http.as_ref(), &url).await
+                })
+                .await;
+                let Ok(rules) = fetched else {
+                    timed_out = true;
+                    failed.push(FailedUrl {
+                        url: url.to_string(),
+                        error: CRAWL_TIMED_OUT.to_string(),
+                    });
+                    break;
+                };
                 robots_by_origin.insert(origin.clone(), rules);
             }
             let robots_refusal = match robots_by_origin.get(&origin) {
@@ -331,10 +368,11 @@ impl Crawler {
             }
 
             pages_read += 1;
-            let read = {
+            let read = tokio::time::timeout_at(fetch_deadline, async {
                 let _host_turn = self.gate.hold(&host).await;
-                tokio::time::timeout_at(deadline, self.reader.read(url.as_str())).await
-            };
+                self.reader.read(url.as_str()).await
+            })
+            .await;
             let page = match read {
                 Err(_elapsed) => {
                     timed_out = true;
@@ -354,11 +392,13 @@ impl Crawler {
                 Ok(Ok(page)) => page,
             };
             seen.insert(page.url.to_string());
-            let site = start_site
-                .get_or_insert_with(|| site_of(&page.url).unwrap_or_default())
-                .clone();
             if depth < plan.max_depth {
-                for link in next_links(&page.links, plan, &site, &seen) {
+                // The frontier never holds more than the pages left to read.
+                let room = plan.limit.saturating_sub(pages_read + queue.len());
+                for link in next_links(&page.links, plan, &start_site, &seen)
+                    .into_iter()
+                    .take(room)
+                {
                     seen.insert(link.to_string());
                     queue.push_back((link, depth + 1));
                 }
@@ -366,11 +406,12 @@ impl Crawler {
             pages.push(page);
         }
 
-        let (extracted, scored_irrelevant, scoring_failures) = self.score(plan, pages).await;
+        let (extracted, scored_irrelevant, scoring_failures, scoring_timed_out) =
+            self.score(plan, pages, deadline).await;
         CrawlOutcome {
             response: ExtractResponse { extracted, failed },
             pages_read,
-            timed_out,
+            timed_out: timed_out || scoring_timed_out,
             scored_irrelevant,
             scoring_failures,
         }
@@ -378,12 +419,15 @@ impl Crawler {
 
     /// Drops pages the model scores as not relevant to the instructions;
     /// without instructions every page is kept. A page the model could not
-    /// score is kept and counted.
+    /// score, or that the deadline left unscored, is kept and counted.
+    /// Returns the pages kept, how many were dropped, how many went
+    /// unscored, and whether the deadline cut scoring short.
     async fn score(
         &self,
         plan: &CrawlPlan,
         pages: Vec<Page>,
-    ) -> (Vec<ExtractedPage>, usize, usize) {
+        deadline: Instant,
+    ) -> (Vec<ExtractedPage>, usize, usize, bool) {
         let Some(instructions) = plan
             .instructions
             .as_deref()
@@ -393,35 +437,51 @@ impl Crawler {
                 .iter()
                 .map(|page| to_extracted(page, plan.full_content))
                 .collect();
-            return (extracted, 0, 0);
+            return (extracted, 0, 0, false);
         };
-        let mut verdicts: Vec<Result<bool, ModelError>> = Vec::with_capacity(pages.len());
+        // `None`: the deadline came before this page was scored.
+        let mut verdicts: Vec<Option<Result<bool, ModelError>>> = Vec::with_capacity(pages.len());
+        let mut timed_out = false;
         for batch in pages.chunks(SCORING_CONCURRENCY) {
-            let scored = futures::future::join_all(batch.iter().map(|page| {
-                is_relevant(
-                    self.model.as_ref(),
-                    instructions,
-                    page.url.as_str(),
-                    &page.text,
-                )
-            }))
+            let scored = tokio::time::timeout_at(
+                deadline,
+                futures::future::join_all(batch.iter().map(|page| {
+                    is_relevant(
+                        self.model.as_ref(),
+                        instructions,
+                        page.url.as_str(),
+                        &page.text,
+                    )
+                })),
+            )
             .await;
-            verdicts.extend(scored);
+            match scored {
+                Ok(scored) => verdicts.extend(scored.into_iter().map(Some)),
+                Err(_elapsed) => {
+                    timed_out = true;
+                    break;
+                }
+            }
         }
+        verdicts.resize_with(pages.len(), || None);
         let mut extracted = Vec::new();
         let mut irrelevant = 0;
         let mut failures = 0;
         for (page, verdict) in pages.iter().zip(verdicts) {
             match verdict {
-                Ok(true) => extracted.push(to_extracted(page, plan.full_content)),
-                Ok(false) => irrelevant += 1,
-                Err(error) => {
+                Some(Ok(true)) => extracted.push(to_extracted(page, plan.full_content)),
+                Some(Ok(false)) => irrelevant += 1,
+                Some(Err(error)) => {
                     tracing::warn!(url = %page.url, error = %error, "relevance scoring failed; page kept");
+                    failures += 1;
+                    extracted.push(to_extracted(page, plan.full_content));
+                }
+                None => {
                     failures += 1;
                     extracted.push(to_extracted(page, plan.full_content));
                 }
             }
         }
-        (extracted, irrelevant, failures)
+        (extracted, irrelevant, failures, timed_out)
     }
 }
