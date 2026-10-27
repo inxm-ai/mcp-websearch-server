@@ -80,3 +80,51 @@ pub struct SearchResponse {
     pub answer: String,
     pub results: Vec<SearchHit>,
 }
+
+/// Arguments for `extract`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ExtractRequest {
+    /// Absolute http(s) URLs of the pages to read; any number.
+    pub urls: Vec<String>,
+}
+
+/// One page read to text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtractedPage {
+    /// The page's readable text: main content, without navigation, scripts
+    /// and page chrome.
+    pub text: String,
+    pub url: String,
+    pub favicon: String,
+}
+
+/// A URL that yielded no text, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FailedUrl {
+    pub url: String,
+    pub error: String,
+}
+
+/// Result of `extract`, `crawl` and `crawl_company_website`: every requested
+/// or visited URL appears in exactly one of the two lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtractResponse {
+    pub extracted: Vec<ExtractedPage>,
+    pub failed: Vec<FailedUrl>,
+}
+
+/// Arguments for `download_file`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DownloadRequest {
+    /// Absolute http(s) URL of the file.
+    pub url: String,
+}
+
+/// Result of `download_file`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DownloadedFile {
+    /// Text files as text; anything else base64-encoded.
+    pub content: String,
+    /// The file's MIME type as the server sent it.
+    pub content_type: String,
+}

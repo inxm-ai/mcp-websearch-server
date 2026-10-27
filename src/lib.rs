@@ -5,8 +5,14 @@
 //! [`contract`]; `*_adapter` modules own all network access (see AGENTS.md
 //! for the full layering convention).
 
+pub mod address_policy;
 pub mod config;
 pub mod contract;
+pub mod download;
+pub mod extract;
+pub mod fetch;
+pub mod html;
+pub mod http_fetch_adapter;
 pub mod search;
 pub mod searxng_adapter;
 pub mod server;
