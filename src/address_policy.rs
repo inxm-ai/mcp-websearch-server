@@ -83,6 +83,11 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Public IPv6 is global unicast (`2000::/3`) outside the special-purpose
+/// blocks IANA carves from it. Everything else (loopback, unspecified,
+/// unique local, link-local, multicast, discard, reserved) falls outside
+/// `2000::/3` and is refused without listing it. IPv4-mapped and NAT64
+/// addresses are judged by the IPv4 address they reach.
 fn is_public_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_public_v4(v4);
@@ -94,14 +99,12 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         let [c, d] = segments[7].to_be_bytes();
         return is_public_v4(Ipv4Addr::new(a, b, c, d));
     }
-    !(ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00 // unique local
-        || (segments[0] & 0xffc0) == 0xfe80 // link-local
-        || (segments[0] & 0xffc0) == 0xfec0 // site-local
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
-        || segments[..6] == [0, 0, 0, 0, 0, 0]) // IPv4-compatible
+    let global_unicast = (segments[0] & 0xe000) == 0x2000;
+    global_unicast
+        && !((segments[0] == 0x2001 && segments[1] < 0x0200) // IETF protocol assignments: Teredo, benchmarking, ORCHID, …
+            || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
+            || segments[0] == 0x2002 // 6to4, reaches an embedded IPv4 address through any relay
+            || (segments[0] & 0xfff0) == 0x3ff0) // documentation (3fff::/20)
 }
 
 fn is_public_v4(ip: Ipv4Addr) -> bool {

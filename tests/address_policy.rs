@@ -89,6 +89,15 @@ fn only_globally_routable_addresses_are_public() {
         "2001:db8::1",
         "::",
         "::1.2.3.4",
+        "2001:2::1",
+        "2001:10::1",
+        "2001:20::1",
+        "2001::1",
+        "2002:a00:1::1",
+        "3fff::1",
+        "100::1",
+        "64:ff9b:1::1",
+        "4000::1",
     ] {
         assert!(!is_public_ip(ip(address)), "{address}");
     }
