@@ -3,7 +3,8 @@
 //! Keep this file to imports and startup only; tools, contracts, and wiring
 //! live in the owned modules (see AGENTS.md).
 
-use mcp_websearch_server::server::Greeter;
+use mcp_websearch_server::config::Config;
+use mcp_websearch_server::server::WebSearch;
 use rmcp::{transport::stdio, ServiceExt};
 
 #[tokio::main]
@@ -15,7 +16,8 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
-    let server = Greeter.serve(stdio()).await?;
+    let config = Config::from_env()?;
+    let server = WebSearch::new(&config)?.serve(stdio()).await?;
     server.waiting().await?;
     Ok(())
 }

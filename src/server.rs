@@ -1,46 +1,84 @@
 //! Tool registration and bridge wiring for mcp-websearch-server.
+//!
+//! The one place that builds adapters and hands them to the pure modules as
+//! ports.
+
+use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
-    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
+    tool, tool_handler, tool_router, ServerHandler,
 };
-use serde::Deserialize;
+use tracing::{field, Instrument};
 
-use crate::contract::{GreetingResult, Language};
+use crate::config::Config;
+use crate::contract::{SearchRequest, SearchResponse};
+use crate::search::{run_search, SearchCache, SearchEngine, CACHE_TTL};
+use crate::searxng_adapter::SearxngClient;
+use crate::tool_failure::{FailureKind, ToolFailure};
 
-/// Pure logic — keep it separately callable so behavior tests never need the
-/// server (Logic Sandwich: pure logic here, I/O only at adapter edges).
-pub fn build_greeting(name: &str) -> GreetingResult {
-    GreetingResult {
-        greeting: format!("Hello, {name}!"),
-        language: Language::En,
+/// Records how long the tool call took on its span.
+fn record_latency(span: &tracing::Span, started: Instant) {
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    span.record("tool.latency_ms", latency_ms);
+}
+
+#[derive(Clone)]
+pub struct WebSearch {
+    search_engine: Arc<dyn SearchEngine>,
+    search_cache: Arc<SearchCache>,
+}
+
+impl WebSearch {
+    /// Builds the server and its adapters from `config`.
+    pub fn new(config: &Config) -> anyhow::Result<Self> {
+        Ok(Self {
+            search_engine: Arc::new(SearxngClient::new(&config.searxng_url)?),
+            search_cache: Arc::new(SearchCache::new(CACHE_TTL)),
+        })
     }
 }
 
-/// Arguments for the `greet` tool — field names, types, and doc comments
-/// flow directly into the tool's JSON Schema.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GreetRequest {
-    /// Display name to address.
-    pub name: String,
-}
-
-#[derive(Clone, Default)]
-pub struct Greeter;
-
 #[tool_router]
-impl Greeter {
-    /// Produce a personalized greeting for `name`.
-    ///
-    /// Use this when the user asks to be greeted or welcomed. `name` is the
-    /// display name to address; the result carries the greeting text and the
-    /// language it is written in.
-    #[tool(description = "Produce a personalized greeting for `name`.")]
-    async fn greet(
+impl WebSearch {
+    /// Search the web for up-to-date information. At most 10 results, each
+    /// with title, URL and snippet; with `topic: "news"` snippets start with
+    /// the publication date. `answer` is always empty.
+    #[tool(
+        description = "Search the web for real-time information about any topic. Use this tool when you need up-to-date information that might not be available in your training data, or when you need to verify current facts. Returns at most 10 results with title, URL and snippet; with topic \"news\" snippets start with the publication date when known. `answer` is always empty.\n\nExamples:\n{\"query\": \"What are the latest advancements in AI technology?\", \"topic\": \"general\", \"time_range\": \"month\"}\n{\"query\": \"Recent news about space exploration\", \"topic\": \"news\", \"days\": 3}\n{\"query\": \"Current trends in renewable energy\", \"topic\": \"general\", \"time_range\": \"week\"}",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn search(
         &self,
-        Parameters(GreetRequest { name }): Parameters<GreetRequest>,
-    ) -> Result<Json<GreetingResult>, McpError> {
-        Ok(Json(build_greeting(&name)))
+        Parameters(request): Parameters<SearchRequest>,
+    ) -> Result<Json<SearchResponse>, ToolFailure> {
+        let span = tracing::info_span!(
+            "tool.search",
+            tool.latency_ms = field::Empty,
+            search.cache_hit = field::Empty,
+            search.unresponsive_engines = field::Empty,
+            search.result_count = field::Empty,
+        );
+        let started = Instant::now();
+        let outcome = run_search(
+            self.search_engine.as_ref(),
+            &self.search_cache,
+            &request,
+            started,
+        )
+        .instrument(span.clone())
+        .await;
+        record_latency(&span, started);
+        let outcome = outcome
+            .map_err(|error| ToolFailure::new(FailureKind::UpstreamFailed, error.to_string()))?;
+        span.record("search.cache_hit", outcome.cache_hit);
+        span.record(
+            "search.unresponsive_engines",
+            outcome.unresponsive_engines.join(","),
+        );
+        span.record("search.result_count", outcome.response.results.len());
+        Ok(Json(outcome.response))
     }
 }
 
@@ -48,5 +86,5 @@ impl Greeter {
 // name's length; skip it so a generated repo is fmt-clean for any name. Safe
 // to drop (with a `cargo fmt` run) once this line stops changing.
 #[rustfmt::skip]
-#[tool_handler(name = "mcp-websearch-server", instructions = "Greets callers by name.")]
-impl ServerHandler for Greeter {}
+#[tool_handler(name = "mcp-websearch-server", instructions = "Web search, page extraction, file download, site crawling and multi-step web research over self-hosted search (SearXNG) and a page renderer.")]
+impl ServerHandler for WebSearch {}

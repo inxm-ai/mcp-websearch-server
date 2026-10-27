@@ -23,13 +23,18 @@ unsafe_code = "forbid"
 
 [dependencies]
 anyhow = ">=1,<2"
+async-trait = ">=0.1,<0.2"
+futures = ">=0.3,<0.4"
+reqwest = { version = ">=0.13,<0.14", default-features = false, features = ["rustls", "json", "query", "gzip", "brotli", "deflate"] }
 rmcp = { version = ">=3.1,<4", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = ">=1,<2"
 serde = { version = ">=1,<2", features = ["derive"] }
 serde_json = ">=1,<2"
-tokio = { version = ">=1.40,<2", features = ["rt-multi-thread", "macros", "io-std"] }
+thiserror = ">=2,<3"
+tokio = { version = ">=1.40,<2", features = ["rt-multi-thread", "macros", "io-std", "time", "sync"] }
 tracing = ">=0.1,<0.2"
 tracing-subscriber = { version = ">=0.3,<0.4", features = ["env-filter"] }
+url = ">=2.5,<3"
 
 [lints.clippy]
 # Warn, not deny: `cargo build` stays fast and quiet during normal
