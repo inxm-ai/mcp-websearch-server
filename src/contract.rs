@@ -246,3 +246,56 @@ pub struct ResearchResult {
     pub content: String,
     pub sources: Vec<ResearchSource>,
 }
+
+/// Social platforms tavily's `search_social_media` knew.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Tiktok,
+    Facebook,
+    Instagram,
+    Reddit,
+    Linkedin,
+    X,
+    #[default]
+    Combined,
+}
+
+fn default_social_max_results() -> u32 {
+    10
+}
+
+/// Arguments for `search_social_media`, accepted for compatibility.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SocialMediaRequest {
+    pub query: String,
+    #[serde(default)]
+    pub platform: Platform,
+    #[serde(default)]
+    pub include_raw_content: bool,
+    #[serde(default = "default_social_max_results")]
+    pub max_results: u32,
+    #[serde(default)]
+    pub include_answer: bool,
+    #[serde(default)]
+    pub time_range: Option<TimeRange>,
+}
+
+/// One social media hit (the shape tavily returned).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SocialMediaResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub raw_content: Option<String>,
+    pub favicon: String,
+}
+
+/// Result shape of `search_social_media` (never produced by this server).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SocialMediaSearchResults {
+    pub query: String,
+    pub platform: Platform,
+    pub answer: String,
+    pub results: Vec<SocialMediaResult>,
+}

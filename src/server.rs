@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::contract::{
     CrawlCompanyRequest, CrawlRequest, DownloadRequest, DownloadedFile, ExtractRequest,
     ExtractResponse, ResearchRequest, ResearchResult, SearchRequest, SearchResponse,
+    SocialMediaRequest, SocialMediaSearchResults,
 };
 use crate::crawl::{
     compile_path_patterns, crawl_timeout, CrawlOutcome, CrawlPlan, Crawler, HostGate,
@@ -323,6 +324,26 @@ impl WebSearch {
         span.record("research.source_count", result.sources.len());
         Ok(Json(result))
     }
+
+    /// Not available on this server: always fails with `tool_not_available`.
+    #[tool(
+        description = "Not available on this server yet: social media search always fails with `tool_not_available`. Use `search` for public web results instead.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn search_social_media(
+        &self,
+        Parameters(_request): Parameters<SocialMediaRequest>,
+    ) -> Result<Json<SocialMediaSearchResults>, ToolFailure> {
+        Err(social_media_not_available())
+    }
+}
+
+/// The typed refusal `search_social_media` answers every call with.
+pub fn social_media_not_available() -> ToolFailure {
+    ToolFailure::new(
+        FailureKind::ToolNotAvailable,
+        "search_social_media is not available on this server yet",
+    )
 }
 
 fn crawl_span(name: &'static str) -> tracing::Span {
