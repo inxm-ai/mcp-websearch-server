@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mcp_websearch_server::download::{download, encode_file, DownloadFailure, MAX_DOWNLOAD_BYTES};
+use mcp_websearch_server::extract::extract_urls_within;
 use mcp_websearch_server::extract::{
     content_kind, extract_urls, needs_render, ContentKind, ExtractStage, PageReader, RenderError,
     RenderedPage, Renderer, MAX_EXTRACT_URLS,
@@ -274,4 +275,51 @@ async fn urls_past_the_per_call_limit_are_reported_not_read() {
         format!("not read: at most {MAX_EXTRACT_URLS} URLs per call")
     );
     assert_eq!(response.failed[0].error, "refused: private address");
+}
+
+#[tokio::test]
+async fn the_text_budget_cuts_the_page_that_reaches_it_and_skips_the_rest() {
+    let page = |letter: &str| format!("<p>{}</p>", letter.repeat(300));
+    let (a, b, c) = (page("a"), page("b"), page("c"));
+    let http = ScriptedHttp::new(&[
+        ("https://t.example/a", 200, "text/html", &a),
+        ("https://t.example/b", 200, "text/html", &b),
+        ("https://t.example/c", 200, "text/html", &c),
+    ]);
+    let reader = PageReader::new(Arc::new(http), None);
+    let urls: Vec<String> = [
+        "https://t.example/a",
+        "https://t.example/b",
+        "https://t.example/c",
+    ]
+    .map(String::from)
+    .to_vec();
+
+    let (response, counts) = extract_urls_within(&reader, &urls, 500).await;
+
+    let kept: Vec<(&str, usize, usize)> = response
+        .extracted
+        .iter()
+        .map(|page| (page.url.as_str(), page.text.len(), page.text.capacity()))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            ("https://t.example/a", 300, 300),
+            ("https://t.example/b", 200, 200)
+        ]
+    );
+    let failed: Vec<(&str, &str)> = response
+        .failed
+        .iter()
+        .map(|failure| (failure.url.as_str(), failure.error.as_str()))
+        .collect();
+    assert_eq!(
+        failed,
+        vec![(
+            "https://t.example/c",
+            "not read: the call's text budget is spent"
+        )]
+    );
+    assert_eq!((counts.http, counts.failed), (2, 1));
 }

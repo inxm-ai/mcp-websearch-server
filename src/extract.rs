@@ -24,6 +24,9 @@ pub const EXTRACT_CONCURRENCY: usize = 4;
 /// URLs one `extract` call reads; with the per-page byte cap this bounds a
 /// call's work and memory. Later URLs are reported as not read.
 pub const MAX_EXTRACT_URLS: usize = 50;
+/// Page text one `extract` call returns across all URLs; the page that
+/// reaches it is cut and the URLs after it are reported as not read.
+pub const MAX_EXTRACT_TEXT_BYTES: usize = 20 * 1024 * 1024;
 /// Phrases a JavaScript app shell shows instead of content.
 const SCRIPT_REQUIRED_PHRASES: &[&str] = &[
     "enable javascript",
@@ -79,6 +82,8 @@ pub enum ExtractFailure {
     RenderFailed(RenderError),
     #[error("not read: at most {MAX_EXTRACT_URLS} URLs per call")]
     OverUrlLimit,
+    #[error("not read: the call's text budget is spent")]
+    TextBudgetSpent,
 }
 
 impl From<FetchError> for ExtractFailure {
@@ -306,42 +311,73 @@ pub struct StageCounts {
     pub failed: usize,
 }
 
-/// Reads the first [`MAX_EXTRACT_URLS`] of `urls` concurrently, keeping the
-/// caller's order within `extracted` and `failed`; any further URLs are
-/// reported as not read.
+/// Cuts `text` to at most `bytes` bytes, at a character boundary, and frees
+/// what the cut leaves unused: `String::truncate` alone keeps the whole
+/// original buffer.
+pub(crate) fn keep_bytes(text: &mut String, bytes: usize) {
+    if text.len() > bytes {
+        let mut end = bytes;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    if text.capacity() > text.len() {
+        *text = text.as_str().to_owned();
+    }
+}
+
+/// [`extract_urls_within`] with [`MAX_EXTRACT_TEXT_BYTES`].
 pub async fn extract_urls(reader: &PageReader, urls: &[String]) -> (ExtractResponse, StageCounts) {
+    extract_urls_within(reader, urls, MAX_EXTRACT_TEXT_BYTES).await
+}
+
+/// Reads the first [`MAX_EXTRACT_URLS`] of `urls` concurrently, keeping the
+/// caller's order within `extracted` and `failed`, and at most
+/// `text_budget_bytes` of text across them: the page that reaches the budget
+/// is cut, pages still being read are cancelled, and every URL not read
+/// (past the URL limit or the budget) is reported as such.
+pub async fn extract_urls_within(
+    reader: &PageReader,
+    urls: &[String],
+    text_budget_bytes: usize,
+) -> (ExtractResponse, StageCounts) {
     let (to_read, over_limit) = urls.split_at(urls.len().min(MAX_EXTRACT_URLS));
-    let mut outcomes: Vec<(String, Result<Page, ExtractFailure>)> =
-        futures::stream::iter(to_read.iter().cloned())
-            .map(|url: String| async move {
-                let outcome = reader.read(&url).await;
-                (url, outcome)
-            })
-            .buffered(EXTRACT_CONCURRENCY)
-            .collect()
-            .await;
-    outcomes.extend(
-        over_limit
-            .iter()
-            .map(|url| (url.clone(), Err(ExtractFailure::OverUrlLimit))),
-    );
     let mut response = ExtractResponse {
         extracted: Vec::new(),
         failed: Vec::new(),
     };
     let mut counts = StageCounts::default();
-    for (requested_url, outcome) in outcomes {
+    let mut kept_bytes = 0;
+    let mut answered = 0;
+    let mut outcomes = futures::stream::iter(to_read.iter().cloned())
+        .map(|url: String| async move {
+            let outcome = reader.read(&url).await;
+            (url, outcome)
+        })
+        .buffered(EXTRACT_CONCURRENCY);
+    while let Some((requested_url, outcome)) = outcomes.next().await {
+        answered += 1;
         match outcome {
             Ok(page) => {
                 match page.stage {
                     ExtractStage::Http => counts.http += 1,
                     ExtractStage::Render => counts.render += 1,
                 }
+                // Only the text is kept; the page's links go with `page`.
+                let mut text = page.text;
+                let budget_left = text_budget_bytes.saturating_sub(kept_bytes);
+                let budget_spent = text.len() >= budget_left;
+                keep_bytes(&mut text, budget_left);
+                kept_bytes += text.capacity();
                 response.extracted.push(ExtractedPage {
-                    text: page.text,
+                    text,
                     url: requested_url,
                     favicon: String::new(),
                 });
+                if budget_spent {
+                    break;
+                }
             }
             Err(failure) => {
                 counts.failed += 1;
@@ -351,6 +387,23 @@ pub async fn extract_urls(reader: &PageReader, urls: &[String]) -> (ExtractRespo
                 });
             }
         }
+    }
+    // Dropping the stream cancels reads still in flight.
+    drop(outcomes);
+    let not_read = to_read[answered..]
+        .iter()
+        .map(|url| (url, ExtractFailure::TextBudgetSpent))
+        .chain(
+            over_limit
+                .iter()
+                .map(|url| (url, ExtractFailure::OverUrlLimit)),
+        );
+    for (url, failure) in not_read {
+        counts.failed += 1;
+        response.failed.push(FailedUrl {
+            url: url.clone(),
+            error: failure.to_string(),
+        });
     }
     (response, counts)
 }

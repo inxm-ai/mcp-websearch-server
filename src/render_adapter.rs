@@ -33,7 +33,7 @@ use tokio::sync::OnceCell;
 use url::Url;
 
 use crate::address_policy::{check_url, is_public_ip, loggable_url, Refusal};
-use crate::extract::{RenderError, RenderedPage, Renderer};
+use crate::extract::{RenderError, RenderedPage, Renderer, MAX_PAGE_BYTES};
 use crate::fetch::HopGate;
 
 /// Warm browsers kept once the pool exists; more start on demand up to the
@@ -307,6 +307,18 @@ async fn navigation_refusal(
     gate.allow(&url).await.err().map(RenderError::HopRefused)
 }
 
+/// Script returning the rendered document's HTML cut to `max_bytes` bytes
+/// of UTF-8; a character the cut splits becomes U+FFFD, so the result can
+/// exceed `max_bytes` by at most two bytes.
+fn bounded_html_script(max_bytes: usize) -> String {
+    format!(
+        "(() => {{ const root = document.documentElement; \
+         if (!root) return ''; \
+         const bytes = new TextEncoder().encode(root.outerHTML); \
+         return new TextDecoder().decode(bytes.subarray(0, {max_bytes})); }})()"
+    )
+}
+
 /// Closes every page in `browser` except `keep`: the popups and tabs a
 /// rendered page opened.
 async fn close_other_pages(browser: &Browser, keep: &TargetId) {
@@ -385,8 +397,11 @@ impl StygianRenderer {
             if let Err(error) = &navigation {
                 tracing::debug!(error = %error, "navigation did not settle; reading what rendered");
             }
-            let html = page
-                .content()
+            // The browser cuts the DOM to the HTTP stage's byte cap before it
+            // is sent here, so a page that builds a huge DOM never reaches
+            // this process whole.
+            let html: String = page
+                .eval(&bounded_html_script(MAX_PAGE_BYTES))
                 .await
                 .map_err(|error| RenderError::Browser(error.to_string()))?;
             Ok(RenderedPage { final_url, html })
@@ -486,6 +501,9 @@ mod tests {
   document.getElementById('link').click();
   document.getElementById('form').submit();
 </script></main></body></html>"#;
+    /// A few hundred bytes of HTML whose script builds 10 MiB of text.
+    const HUGE_DOM_PAGE: &str = "<!doctype html><html><body><main id=m></main><script>document.getElementById('m').textContent = 'x'.repeat(10 * 1024 * 1024);</script></body></html>";
+    const HUGE_DOM_PATH: &str = "/huge";
     /// Answers with a redirect to a private path.
     const REDIRECTING_PATH: &str = "/redirect";
     /// Answers with a redirect to `GATED_PATH`, which the test's gate refuses.
@@ -514,7 +532,12 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(path.clone());
-                let response = if path == REDIRECTING_PATH {
+                let response = if path == HUGE_DOM_PATH {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{HUGE_DOM_PAGE}",
+                        HUGE_DOM_PAGE.len()
+                    )
+                } else if path == REDIRECTING_PATH {
                     "HTTP/1.1 302 Found\r\nlocation: /private-redirect\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
                 } else if path == GATED_REDIRECT_PATH {
                     format!("HTTP/1.1 302 Found\r\nlocation: {GATED_PATH}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
@@ -606,5 +629,30 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert_eq!(requested, vec![GATED_REDIRECT_PATH.to_string()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Chrome or Chromium"]
+    async fn a_page_that_builds_a_huge_dom_arrives_cut_to_the_page_cap() {
+        let (url, _) = fixture_server().await;
+        let renderer = StygianRenderer {
+            reach: Reach::LoopbackFixture,
+            ..StygianRenderer::new(1, Duration::from_secs(20))
+        };
+        let huge = url
+            .join(HUGE_DOM_PATH)
+            .unwrap_or_else(|error| panic!("huge URL: {error}"));
+
+        let rendered = renderer
+            .render(&huge, &AnyHop)
+            .await
+            .unwrap_or_else(|error| panic!("render failed: {error}"));
+
+        assert!(
+            rendered.html.len() <= crate::extract::MAX_PAGE_BYTES + 2,
+            "{} bytes of rendered HTML reached the server",
+            rendered.html.len()
+        );
+        assert!(rendered.html.len() > crate::extract::MAX_PAGE_BYTES / 2);
     }
 }
