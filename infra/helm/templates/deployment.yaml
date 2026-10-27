@@ -20,6 +20,12 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      # The image's non-root user (Dockerfile); fsGroup lets it write /data.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       {{- if .Values.persistence.enabled }}
       volumes:
         - name: {{ .Values.appName }}-data
@@ -32,17 +38,35 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.service.port }}
-          {{- with .Values.resources }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              {{- if .Values.render.enabled }}
+              # Chromium's sandbox creates user namespaces, which the
+              # runtime's default seccomp profile forbids; Chromium then
+              # puts each renderer under its own, stricter seccomp filter.
+              # Without that, Chromium does not start and nothing renders.
+              type: Unconfined
+              {{- else }}
+              type: RuntimeDefault
+              {{- end }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- if .Values.env }}
+            {{- include "mcp-websearch-server-chart.resources" . | trim | nindent 12 }}
           env:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-          {{- end }}
+            - name: SEARXNG_URL
+              value: {{ include "mcp-websearch-server-chart.searxngUrl" . | quote }}
+            - name: RENDER_ENABLED
+              value: {{ .Values.render.enabled | quote }}
+            - name: RENDER_POOL_SIZE
+              value: {{ .Values.render.poolSize | quote }}
+            - name: RENDER_TIMEOUT_SECS
+              value: {{ .Values.render.timeoutSeconds | quote }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: {{ .Values.appName }}-data

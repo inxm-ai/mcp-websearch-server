@@ -1,0 +1,57 @@
+{{- if .Values.searxng.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}-searxng
+  labels:
+    app: {{ .Values.appName }}-searxng
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}-searxng
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}-searxng
+      annotations:
+        # Roll the pod when the settings change.
+        checksum/settings: {{ include (print $.Template.BasePath "/searxng-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: searxng
+          image: {{ .Values.searxng.image.repository }}:{{ .Values.searxng.image.tag }}
+          imagePullPolicy: {{ .Values.searxng.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.searxng.port }}
+          env:
+            - name: SEARXNG_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appName }}-searxng
+                  key: secret
+          volumeMounts:
+            - name: settings
+              mountPath: /etc/searxng/settings.yml
+              subPath: settings.yml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.searxng.port }}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.searxng.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          {{- with .Values.searxng.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: settings
+          configMap:
+            name: {{ .Values.appName }}-searxng
+{{- end }}
