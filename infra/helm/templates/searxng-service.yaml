@@ -1,0 +1,16 @@
+{{- if .Values.searxng.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.appName }}-searxng
+  labels:
+    app: {{ .Values.appName }}-searxng
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.searxng.port }}
+      targetPort: {{ .Values.searxng.port }}
+      protocol: TCP
+  selector:
+    app: {{ .Values.appName }}-searxng
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if .Values.searxng.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.appName }}-searxng
+  labels:
+    app: {{ .Values.appName }}-searxng
+data:
+  # Upstream defaults, cut down to the engines in searxng.engines (Google
+  # proper is not among them), with the JSON API on and the limiter off:
+  # the only client is the MCP server, over the cluster Service.
+  settings.yml: |
+    use_default_settings:
+      engines:
+        keep_only:
+          {{- range .Values.searxng.engines }}
+          - {{ . | quote }}
+          {{- end }}
+    general:
+      instance_name: {{ .Values.appName }}
+    search:
+      safe_search: 0
+      formats:
+        - html
+        - json
+    server:
+      limiter: false
+      public_instance: false
+      image_proxy: false
+    engines:
+      {{- range .Values.searxng.engines }}
+      - name: {{ . | quote }}
+        disabled: false
+      {{- end }}
+{{- end }}

@@ -32,17 +32,21 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.service.port }}
-          {{- with .Values.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- if .Values.env }}
+            {{- include "mcp-websearch-server-chart.resources" . | trim | nindent 12 }}
           env:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-          {{- end }}
+            - name: SEARXNG_URL
+              value: {{ include "mcp-websearch-server-chart.searxngUrl" . | quote }}
+            - name: RENDER_ENABLED
+              value: {{ .Values.render.enabled | quote }}
+            - name: RENDER_POOL_SIZE
+              value: {{ .Values.render.poolSize | quote }}
+            - name: RENDER_TIMEOUT_SECS
+              value: {{ .Values.render.timeoutSeconds | quote }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: {{ .Values.appName }}-data

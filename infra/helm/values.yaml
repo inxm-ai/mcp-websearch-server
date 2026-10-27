@@ -31,6 +31,54 @@ env:
   TOOL_INJECTION_MODE: claude
   OTLP_ENDPOINT: http://ops-otel-collector:4317
   MCP_SERVER_COMMAND: "/usr/local/bin/mcp-websearch"
+  # web_research writes through the hub's approval flow, as it did on tavily.
+  EFFECT_TOOLS: "*research*"
+  # SEARXNG_URL and RENDER_* are set by the deployment from `searxng` and
+  # `render` below.
+
+# The metasearch backend `search` calls: upstream SearXNG, unmodified, as its
+# own Deployment reached over its cluster Service only.
+searxng:
+  enabled: true
+  # Used instead of the in-chart Service when set (e.g. with enabled: false).
+  url: ""
+  image:
+    repository: searxng/searxng
+    tag: "2026.10.27-ef7bae9dd"
+    pullPolicy: IfNotPresent
+  port: 8080
+  # Google proper answers "access denied" from datacenter and residential
+  # IPs alike, so it stays off; these are the engines that answer.
+  engines:
+    - brave
+    - duckduckgo
+    - bing
+    - bing news
+    - google news
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Stage two of `extract` (and of the crawlers): headless Chromium for pages
+# plain HTTP cannot read. A small install can run HTTP-only with
+# enabled: false.
+render:
+  enabled: true
+  # Most browsers rendering at once; the pod's resources grow with it.
+  poolSize: 2
+  timeoutSeconds: 20
+  # Added to `resources` per browser in the pool when render is enabled.
+  perBrowser:
+    cpuMillicores:
+      requests: 100
+      limits: 500
+    memoryMi:
+      requests: 256
+      limits: 512
 
 
 persistence:
@@ -59,6 +107,9 @@ podAnnotations: {}
 # Fleet-standard default footprint. Override per repo from measured usage
 # (kubectl top): raise limits if the server OOMs or throttles; keep requests
 # close to real idle/steady usage — they reserve node capacity fleet-wide.
+# This is the footprint without browsers: with render enabled the pod gets
+# render.perBrowser × render.poolSize on top. Write CPU in m or cores and
+# memory in Mi or Gi; the chart adds to these numbers.
 resources:
   requests:
     cpu: 100m
