@@ -17,6 +17,6 @@ RUN cargo build --release --locked
 # digest, and Dependabot opens a PR when `latest` moves, so the check runs on
 # the new bridge before it deploys. The reference stays literal because
 # Dependabot doesn't read it through ARG variables.
-FROM ghcr.io/inxm-ai/enterprise-mcp-bridge:latest@sha256:99531015fc8023906c6dd2c9c0d2c2b632c1373a913680ed978189b776cf82e3
+FROM ghcr.io/inxm-ai/enterprise-mcp-bridge:latest@sha256:ff35f3ee3081e1d403852b80bd84be7129c060ab846087eddc330536ab2ae94e
 COPY --from=builder /build/target/release/mcp-websearch /usr/local/bin/mcp-websearch
 RUN chmod +x /usr/local/bin/mcp-websearch
