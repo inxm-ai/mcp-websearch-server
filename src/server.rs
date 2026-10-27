@@ -181,7 +181,7 @@ impl WebSearch {
 
     /// Read web pages as readable text.
     #[tool(
-        description = "Extract and process content from specific web pages. Use this tool when you have URLs and need to get the full text content from those pages: articles, documentation, or any web page you need to analyze or reference. Returns each page's readable text (main content, without navigation and scripts); URLs that cannot be read are listed in `failed` with the reason (refused address, HTTP status, unsupported content type such as PDF, no readable text, timeout). Any number of URLs may be passed.\n\nExamples:\n{\"urls\": [\"https://inxm.ai\"]}\n{\"urls\": [\"https://techcrunch.com/2024/01/15/ai-startup-funding-round/\", \"https://venturebeat.com/ai/orchestration-platforms-2024/\"]}",
+        description = "Extract and process content from specific web pages. Use this tool when you have URLs and need to get the full text content from those pages: articles, documentation, or any web page you need to analyze or reference. Returns each page's readable text (main content, without navigation and scripts); URLs that cannot be read are listed in `failed` with the reason (refused address, HTTP status, unsupported content type such as PDF, no readable text, timeout). Up to 50 URLs are read per call; any further URLs are listed in `failed` as not read.\n\nExamples:\n{\"urls\": [\"https://inxm.ai\"]}\n{\"urls\": [\"https://techcrunch.com/2024/01/15/ai-startup-funding-round/\", \"https://venturebeat.com/ai/orchestration-platforms-2024/\"]}",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn extract(

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use mcp_websearch_server::download::{download, encode_file, DownloadFailure, MAX_DOWNLOAD_BYTES};
 use mcp_websearch_server::extract::{
     content_kind, extract_urls, needs_render, ContentKind, ExtractStage, PageReader, RenderError,
-    RenderedPage, Renderer,
+    RenderedPage, Renderer, MAX_EXTRACT_URLS,
 };
 use url::Url;
 
@@ -57,6 +57,7 @@ async fn extract_reports_pages_and_typed_failures_in_request_order() {
             "text/html",
             "<div id=root></div>",
         ),
+        ("https://news.example/empty.txt", 200, "text/plain", "  \n "),
         (
             "https://news.example/notes.txt",
             200,
@@ -72,6 +73,7 @@ async fn extract_reports_pages_and_typed_failures_in_request_order() {
         "https://news.example/gone",
         "https://news.example/shell",
         "https://news.example/notes.txt",
+        "https://news.example/empty.txt",
         "not a url",
         "https://news.example/slow",
     ]
@@ -107,11 +109,12 @@ async fn extract_reports_pages_and_typed_failures_in_request_order() {
             ),
             ("https://news.example/gone", "HTTP status 404"),
             ("https://news.example/shell", "no readable text"),
+            ("https://news.example/empty.txt", "no readable text"),
             ("not a url", "invalid URL: relative URL without a base"),
             ("https://news.example/slow", "timed out"),
         ]
     );
-    assert_eq!((counts.http, counts.failed), (2, 6));
+    assert_eq!((counts.http, counts.failed), (2, 7));
 }
 
 #[test]
@@ -249,4 +252,25 @@ async fn a_render_with_less_text_than_http_keeps_the_http_text() {
         .await
         .unwrap_or_else(|error| panic!("read failed: {error}"));
     assert_eq!(page.stage, ExtractStage::Http);
+}
+
+#[tokio::test]
+async fn urls_past_the_per_call_limit_are_reported_not_read() {
+    let http = ScriptedHttp::new(&[]);
+    let reader = PageReader::new(Arc::new(http), None);
+    let urls: Vec<String> = (0..MAX_EXTRACT_URLS + 2)
+        .map(|index| format!("http://10.0.0.{index}/"))
+        .collect();
+
+    let (response, counts) = extract_urls(&reader, &urls).await;
+
+    assert_eq!(response.failed.len(), urls.len());
+    assert_eq!(counts.failed, urls.len());
+    let last = &response.failed[MAX_EXTRACT_URLS + 1];
+    assert_eq!(last.url, urls[MAX_EXTRACT_URLS + 1]);
+    assert_eq!(
+        last.error,
+        format!("not read: at most {MAX_EXTRACT_URLS} URLs per call")
+    );
+    assert_eq!(response.failed[0].error, "refused: private address");
 }

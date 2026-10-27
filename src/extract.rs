@@ -21,6 +21,9 @@ pub const MAX_PAGE_BYTES: usize = 5 * 1024 * 1024;
 pub const MIN_READABLE_CHARS: usize = 200;
 /// Pages read at once by one `extract` call.
 pub const EXTRACT_CONCURRENCY: usize = 4;
+/// URLs one `extract` call reads; with the per-page byte cap this bounds a
+/// call's work and memory. Later URLs are reported as not read.
+pub const MAX_EXTRACT_URLS: usize = 50;
 /// Phrases a JavaScript app shell shows instead of content.
 const SCRIPT_REQUIRED_PHRASES: &[&str] = &[
     "enable javascript",
@@ -71,6 +74,8 @@ pub enum ExtractFailure {
     Network(String),
     #[error("no readable text without rendering, and rendering failed: {0}")]
     RenderFailed(RenderError),
+    #[error("not read: at most {MAX_EXTRACT_URLS} URLs per call")]
+    OverUrlLimit,
 }
 
 impl From<FetchError> for ExtractFailure {
@@ -208,7 +213,7 @@ impl PageReader {
             ContentKind::Unsupported => Err(ExtractFailure::UnsupportedContentType(media_type(
                 &fetched.content_type,
             ))),
-            ContentKind::PlainText => Ok(Page {
+            ContentKind::PlainText => non_empty(Page {
                 text: body.trim().to_string(),
                 links: Vec::new(),
                 url: fetched.final_url,
@@ -278,11 +283,13 @@ pub struct StageCounts {
     pub failed: usize,
 }
 
-/// Reads `urls` concurrently, keeping the caller's order within
-/// `extracted` and `failed`.
+/// Reads the first [`MAX_EXTRACT_URLS`] of `urls` concurrently, keeping the
+/// caller's order within `extracted` and `failed`; any further URLs are
+/// reported as not read.
 pub async fn extract_urls(reader: &PageReader, urls: &[String]) -> (ExtractResponse, StageCounts) {
-    let outcomes: Vec<(String, Result<Page, ExtractFailure>)> =
-        futures::stream::iter(urls.iter().cloned())
+    let (to_read, over_limit) = urls.split_at(urls.len().min(MAX_EXTRACT_URLS));
+    let mut outcomes: Vec<(String, Result<Page, ExtractFailure>)> =
+        futures::stream::iter(to_read.iter().cloned())
             .map(|url: String| async move {
                 let outcome = reader.read(&url).await;
                 (url, outcome)
@@ -290,6 +297,11 @@ pub async fn extract_urls(reader: &PageReader, urls: &[String]) -> (ExtractRespo
             .buffered(EXTRACT_CONCURRENCY)
             .collect()
             .await;
+    outcomes.extend(
+        over_limit
+            .iter()
+            .map(|url| (url.clone(), Err(ExtractFailure::OverUrlLimit))),
+    );
     let mut response = ExtractResponse {
         extracted: Vec::new(),
         failed: Vec::new(),
