@@ -12,7 +12,8 @@ use mcp_websearch_server::research::{
     ResearchFailure, Researcher,
 };
 use mcp_websearch_server::search::{
-    EngineQuery, EngineResponse, EngineResult, SearchCache, SearchEngine, SearchError, CACHE_TTL,
+    EngineQuery, EngineResponse, EngineResult, SearchCache, SearchEngine, SearchError,
+    CACHE_CAPACITY, CACHE_TTL,
 };
 
 mod common;
@@ -136,7 +137,7 @@ fn researcher(
         search_engine: Arc::new(FixedEngine {
             urls: urls.iter().map(|url| url.to_string()).collect(),
         }),
-        search_cache: Arc::new(SearchCache::new(CACHE_TTL)),
+        search_cache: Arc::new(SearchCache::new(CACHE_TTL, CACHE_CAPACITY)),
         reader: Arc::new(PageReader::new(Arc::new(ScriptedHttp::new(pages)), None)),
         model,
     }

@@ -17,6 +17,9 @@ pub const MAX_RESULTS: usize = 10;
 /// How long a search answer is reused, so a plan's fan-out does not re-hit
 /// the engines with the same query.
 pub const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+/// Most search answers held at once; past it the oldest is evicted, so a
+/// stream of unique queries cannot grow the cache without bound.
+pub const CACHE_CAPACITY: usize = 1_000;
 
 const DAYS_PER_WEEK: u32 = 7;
 const DAYS_PER_MONTH: u32 = 31;
@@ -209,16 +212,19 @@ pub struct CacheKey {
     pub time_range: Option<TimeRange>,
 }
 
-/// In-memory search answers, each reused for `ttl`.
+/// In-memory search answers, each reused for `ttl`, at most `capacity` of
+/// them.
 pub struct SearchCache {
     ttl: Duration,
+    capacity: usize,
     entries: Mutex<HashMap<CacheKey, (Instant, SearchResponse)>>,
 }
 
 impl SearchCache {
-    pub fn new(ttl: Duration) -> Self {
+    pub fn new(ttl: Duration, capacity: usize) -> Self {
         Self {
             ttl,
+            capacity: capacity.max(1),
             entries: Mutex::new(HashMap::new()),
         }
     }
@@ -237,11 +243,29 @@ impl SearchCache {
             .map(|(_, response)| response.clone())
     }
 
-    /// Stores `response`, dropping entries that have expired.
+    /// Stores `response`, dropping entries that have expired and, when the
+    /// cache is still full, the one stored longest ago.
     pub fn put(&self, key: CacheKey, response: SearchResponse, now: Instant) {
         let mut entries = self.entries();
         entries.retain(|_, (stored_at, _)| now.saturating_duration_since(*stored_at) < self.ttl);
+        if !entries.contains_key(&key) && entries.len() >= self.capacity {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, (stored_at, _))| *stored_at)
+                .map(|(oldest, _)| oldest.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
         entries.insert(key, (now, response));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries().is_empty()
     }
 }
 

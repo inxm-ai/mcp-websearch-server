@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use mcp_websearch_server::contract::{SearchRequest, TimeRange, Topic, DEFAULT_NEWS_DAYS};
 use mcp_websearch_server::search::{
     effective_time_range, engine_queries, merge_results, run_search, snippet, Category,
-    EngineQuery, EngineResponse, EngineResult, SearchCache, SearchEngine, SearchError, CACHE_TTL,
-    MAX_RESULTS,
+    EngineQuery, EngineResponse, EngineResult, SearchCache, SearchEngine, SearchError,
+    CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
 };
 
 fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRequest {
@@ -141,7 +141,7 @@ fn snippet_prefixes_only_a_real_date() {
 
 #[test]
 fn cache_entries_expire_after_their_ttl() {
-    let cache = SearchCache::new(Duration::from_secs(60));
+    let cache = SearchCache::new(Duration::from_secs(60), CACHE_CAPACITY);
     let key = mcp_websearch_server::search::CacheKey {
         query: "q".into(),
         topic: Topic::General,
@@ -209,7 +209,7 @@ async fn news_search_merges_both_categories_and_is_cached() {
         general: Ok(vec![hit("https://web.example/1", None)]),
         calls: Mutex::new(Vec::new()),
     };
-    let cache = SearchCache::new(CACHE_TTL);
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
     let search = request(
         "Arsenal official statement",
         Topic::News,
@@ -252,7 +252,7 @@ async fn one_failing_category_degrades_and_is_not_cached() {
         general: Ok(vec![hit("https://web.example/1", None)]),
         calls: Mutex::new(Vec::new()),
     };
-    let cache = SearchCache::new(CACHE_TTL);
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
     let search = request("q", Topic::News, None);
     let now = Instant::now();
 
@@ -274,7 +274,7 @@ async fn search_fails_when_every_category_fails() {
         general: Err(503),
         calls: Mutex::new(Vec::new()),
     };
-    let cache = SearchCache::new(CACHE_TTL);
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
     let outcome = run_search(
         &engine,
         &cache,
@@ -283,4 +283,74 @@ async fn search_fails_when_every_category_fails() {
     )
     .await;
     assert!(matches!(outcome, Err(SearchError::Status(503))));
+}
+
+fn cache_key(query: &str) -> mcp_websearch_server::search::CacheKey {
+    mcp_websearch_server::search::CacheKey {
+        query: query.into(),
+        topic: Topic::General,
+        time_range: None,
+    }
+}
+
+fn empty_response(query: &str) -> mcp_websearch_server::contract::SearchResponse {
+    mcp_websearch_server::contract::SearchResponse {
+        query: query.into(),
+        answer: String::new(),
+        results: Vec::new(),
+    }
+}
+
+#[test]
+fn a_full_cache_evicts_the_answer_stored_longest_ago() {
+    let cache = SearchCache::new(Duration::from_secs(600), 2);
+    let start = Instant::now();
+    cache.put(cache_key("first"), empty_response("first"), start);
+    cache.put(
+        cache_key("second"),
+        empty_response("second"),
+        start + Duration::from_secs(1),
+    );
+    cache.put(
+        cache_key("third"),
+        empty_response("third"),
+        start + Duration::from_secs(2),
+    );
+
+    let now = start + Duration::from_secs(3);
+    assert_eq!(cache.len(), 2);
+    assert_eq!(cache.get(&cache_key("first"), now), None);
+    assert!(cache.get(&cache_key("second"), now).is_some());
+    assert!(cache.get(&cache_key("third"), now).is_some());
+}
+
+#[test]
+fn storing_a_cached_query_again_evicts_nothing() {
+    let cache = SearchCache::new(Duration::from_secs(600), 2);
+    let start = Instant::now();
+    cache.put(cache_key("first"), empty_response("first"), start);
+    cache.put(cache_key("second"), empty_response("second"), start);
+    cache.put(
+        cache_key("first"),
+        empty_response("first"),
+        start + Duration::from_secs(1),
+    );
+
+    assert_eq!(cache.len(), 2);
+    assert!(cache.get(&cache_key("second"), start).is_some());
+}
+
+#[test]
+fn unique_queries_never_grow_the_cache_past_its_capacity() {
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
+    let start = Instant::now();
+    for index in 0..CACHE_CAPACITY * 3 {
+        let query = format!("query {index}");
+        cache.put(
+            cache_key(&query),
+            empty_response(&query),
+            start + Duration::from_millis(index as u64),
+        );
+    }
+    assert_eq!(cache.len(), CACHE_CAPACITY);
 }

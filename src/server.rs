@@ -33,7 +33,7 @@ use crate::llm_adapter::{TgiChatModel, UnconfiguredModel};
 use crate::model::ChatModel;
 use crate::render_adapter::StygianRenderer;
 use crate::research::{Phase, ProgressSink, Researcher};
-use crate::search::{run_search, SearchCache, SearchEngine, CACHE_TTL};
+use crate::search::{run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
 
@@ -111,7 +111,7 @@ impl WebSearch {
         let page_reader = Arc::new(PageReader::new(http.clone(), renderer));
         let search_engine: Arc<dyn SearchEngine> =
             Arc::new(SearxngClient::new(&config.searxng_url)?);
-        let search_cache = Arc::new(SearchCache::new(CACHE_TTL));
+        let search_cache = Arc::new(SearchCache::new(CACHE_TTL, CACHE_CAPACITY));
         Ok(Self {
             crawler: Arc::new(Crawler {
                 reader: page_reader.clone(),
