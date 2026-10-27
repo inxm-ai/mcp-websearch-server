@@ -167,4 +167,14 @@ Fixture table:
 
 | Fixture | Where | Fakes |
 |---|---|---|
-| _none yet_ | — | add a row per scripted fake as adapters appear |
+| `ScriptedHttp` | `tests/common/mod.rs` | `HttpFetcher` (`http_fetch_adapter`): a URL → (status, content type, body) table; unknown URLs time out |
+| `ScriptedModel` | `tests/common/mod.rs` | `ChatModel` (`llm_adapter`): first rule whose needle the prompt contains answers |
+| `ScriptedEngine`, `FixedEngine` | `tests/search.rs`, `tests/research.rs` | `SearchEngine` (`searxng_adapter`) |
+| `ScriptedRenderer` | `tests/extract.rs` | `Renderer` (`render_adapter`) |
+
+Pure modules that need address types import them from `core::net` (values
+only, no I/O), not `std::net`, which the fitness test reserves for adapters.
+
+The bridge starts a fresh child process for every sessionless tool call, so
+in-process state (the search cache, the warm browser pool) only lives as
+long as one session.
