@@ -225,9 +225,7 @@ impl WebSearch {
             .instrument(span.clone())
             .await;
         record_latency(&span, started);
-        let file = file.map_err(|failure| {
-            ToolFailure::new(FailureKind::InvalidArgument, failure.to_string())
-        })?;
+        let file = file.map_err(|failure| ToolFailure::new(failure.kind(), failure.to_string()))?;
         Ok(Json(file))
     }
 

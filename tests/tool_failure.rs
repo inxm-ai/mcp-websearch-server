@@ -20,3 +20,27 @@ fn search_social_media_answers_tool_not_available() {
     };
     assert_eq!(result.is_error, Some(true));
 }
+
+#[test]
+fn download_failures_blame_the_argument_or_the_upstream() {
+    use mcp_websearch_server::address_policy::Refusal;
+    use mcp_websearch_server::download::DownloadFailure;
+    use mcp_websearch_server::fetch::FetchError;
+    use mcp_websearch_server::tool_failure::FailureKind;
+
+    let argument = [
+        DownloadFailure::InvalidUrl("no scheme".to_string()),
+        DownloadFailure::Refused(Refusal::PrivateAddress),
+        DownloadFailure::TooLarge,
+    ];
+    for failure in &argument {
+        assert_eq!(failure.kind(), FailureKind::InvalidArgument, "{failure}");
+    }
+    let upstream = [
+        DownloadFailure::HttpStatus(503),
+        DownloadFailure::Fetch(FetchError::Timeout),
+    ];
+    for failure in &upstream {
+        assert_eq!(failure.kind(), FailureKind::UpstreamFailed, "{failure}");
+    }
+}

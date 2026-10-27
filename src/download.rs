@@ -7,6 +7,7 @@ use crate::address_policy::{check_url, Refusal};
 use crate::contract::DownloadedFile;
 use crate::extract::media_type;
 use crate::fetch::{FetchError, HttpFetcher};
+use crate::tool_failure::FailureKind;
 
 /// Largest file returned; a bigger one fails instead of arriving cut.
 pub const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
@@ -31,6 +32,22 @@ pub enum DownloadFailure {
     TooLarge,
     #[error(transparent)]
     Fetch(FetchError),
+}
+
+impl DownloadFailure {
+    /// How the failure is reported: the caller's URL (invalid, refused, too
+    /// large) is an argument problem; a server that answered badly or not
+    /// at all is an upstream one.
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            DownloadFailure::InvalidUrl(_)
+            | DownloadFailure::Refused(_)
+            | DownloadFailure::TooLarge => FailureKind::InvalidArgument,
+            DownloadFailure::HttpStatus(_) | DownloadFailure::Fetch(_) => {
+                FailureKind::UpstreamFailed
+            }
+        }
+    }
 }
 
 /// Whether a file of this content type is returned as text.
