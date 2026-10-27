@@ -17,6 +17,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # trigger-deployment.yaml calls this before it deploys.
+  workflow_call:
 
 jobs:
   chart:
