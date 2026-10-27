@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use mcp_websearch_server::crawl::{
     bounded_count, compile_path_patterns, crawl_timeout, next_links, path_allowed, site_of,
-    CrawlPlan, Crawler, HostGate, MAX_CRAWL_BREADTH, TRUNCATED_TEXT_CHARS,
+    CrawlPlan, Crawler, HostGate, MAX_CRAWL_BREADTH, MAX_CRAWL_TEXT_BYTES, TRUNCATED_TEXT_CHARS,
 };
 use mcp_websearch_server::extract::PageReader;
 use mcp_websearch_server::fetch::HttpFetcher;
@@ -33,6 +33,7 @@ fn plan(start_url: &str) -> CrawlPlan {
         max_breadth: 10,
         max_depth: 2,
         limit: 50,
+        text_budget_bytes: MAX_CRAWL_TEXT_BYTES,
     }
 }
 
@@ -561,4 +562,152 @@ async fn a_redirected_robots_txt_is_still_read() {
         failed,
         vec![("https://site.example/private/x", "disallowed by robots.txt")]
     );
+}
+
+/// A page whose readable text is exactly `text`.
+fn text_page(text: &str, links: &[&str]) -> String {
+    let anchors: String = links
+        .iter()
+        .map(|link| format!(r#"<a href="{link}"></a>"#))
+        .collect();
+    format!("<html><body><p>{text}</p>{anchors}</body></html>")
+}
+
+#[tokio::test]
+async fn a_spent_text_budget_ends_the_crawl_and_reports_what_was_not_read() {
+    let first = "a".repeat(300);
+    let second = "b".repeat(300);
+    let (crawler, http, _) = crawler(
+        ScriptedHttp::new(&[
+            ("https://big.example/robots.txt", 404, HTML, ""),
+            (
+                "https://big.example/",
+                200,
+                HTML,
+                &text_page(&first, &["/two", "/three", "/four"]),
+            ),
+            (
+                "https://big.example/two",
+                200,
+                HTML,
+                &text_page(&second, &[]),
+            ),
+            (
+                "https://big.example/three",
+                200,
+                HTML,
+                &text_page(&first, &[]),
+            ),
+        ]),
+        ScriptedModel::new(&[]),
+    );
+    let budgeted = CrawlPlan {
+        full_content: true,
+        text_budget_bytes: 500,
+        ..plan("https://big.example/")
+    };
+
+    let outcome = crawler.crawl(&budgeted, far_deadline()).await;
+
+    assert!(outcome.text_budget_spent);
+    let kept: Vec<(&str, usize)> = outcome
+        .response
+        .extracted
+        .iter()
+        .map(|page| (page.url.as_str(), page.text.len()))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            ("https://big.example/", 300),
+            ("https://big.example/two", 200)
+        ]
+    );
+    let not_read: Vec<(&str, &str)> = outcome
+        .response
+        .failed
+        .iter()
+        .map(|failure| (failure.url.as_str(), failure.error.as_str()))
+        .collect();
+    assert_eq!(
+        not_read,
+        vec![
+            (
+                "https://big.example/three",
+                "not read: the crawl's text budget is spent"
+            ),
+            (
+                "https://big.example/four",
+                "not read: the crawl's text budget is spent"
+            ),
+        ]
+    );
+    assert!(!http
+        .requested()
+        .contains(&"https://big.example/three".to_string()));
+}
+
+#[tokio::test]
+async fn the_budget_cuts_text_on_a_character_boundary() {
+    // 'é' is two bytes; a 301-byte budget cannot end inside one.
+    let accented = "é".repeat(400);
+    let (crawler, _, _) = crawler(
+        ScriptedHttp::new(&[
+            ("https://utf8.example/robots.txt", 404, HTML, ""),
+            (
+                "https://utf8.example/",
+                200,
+                HTML,
+                &text_page(&accented, &[]),
+            ),
+        ]),
+        ScriptedModel::new(&[]),
+    );
+    let budgeted = CrawlPlan {
+        full_content: true,
+        text_budget_bytes: 301,
+        ..plan("https://utf8.example/")
+    };
+
+    let outcome = crawler.crawl(&budgeted, far_deadline()).await;
+
+    assert_eq!(outcome.response.extracted[0].text, "é".repeat(150));
+}
+
+#[tokio::test]
+async fn pages_are_cut_as_they_are_read_so_the_budget_counts_only_returned_text() {
+    let long = "x".repeat(TRUNCATED_TEXT_CHARS * 3);
+    let (crawler, _, _) = crawler(
+        ScriptedHttp::new(&[
+            ("https://cut.example/robots.txt", 404, HTML, ""),
+            (
+                "https://cut.example/",
+                200,
+                HTML,
+                &text_page(&long, &["/next"]),
+            ),
+            (
+                "https://cut.example/next",
+                200,
+                HTML,
+                &text_page(&long, &[]),
+            ),
+        ]),
+        ScriptedModel::new(&[]),
+    );
+    // Room for two cut pages, not for one full one.
+    let budgeted = CrawlPlan {
+        text_budget_bytes: TRUNCATED_TEXT_CHARS * 2 + 1,
+        ..plan("https://cut.example/")
+    };
+
+    let outcome = crawler.crawl(&budgeted, far_deadline()).await;
+
+    assert!(!outcome.text_budget_spent);
+    assert_eq!(outcome.response.extracted.len(), 2);
+    assert!(outcome
+        .response
+        .extracted
+        .iter()
+        .all(|page| page.text.len() == TRUNCATED_TEXT_CHARS));
 }

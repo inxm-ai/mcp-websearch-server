@@ -24,6 +24,7 @@ use crate::contract::{
 use crate::crawl::{
     bounded_count, compile_path_patterns, crawl_timeout, CrawlOutcome, CrawlPlan, Crawler,
     HostGate, DEFAULT_CRAWL_LIMIT, MAX_CRAWL_BREADTH, MAX_CRAWL_DEPTH, MAX_CRAWL_LIMIT,
+    MAX_CRAWL_TEXT_BYTES,
 };
 use crate::download::download;
 use crate::extract::{extract_urls, PageReader, Renderer};
@@ -89,6 +90,7 @@ async fn run_crawl(crawler: &Crawler, plan: CrawlPlan, span: &tracing::Span) -> 
     span.record("crawl.timed_out", outcome.timed_out);
     span.record("crawl.scored_irrelevant", outcome.scored_irrelevant);
     span.record("crawl.scoring_failures", outcome.scoring_failures);
+    span.record("crawl.text_budget_spent", outcome.text_budget_spent);
     outcome.response
 }
 
@@ -245,6 +247,7 @@ impl WebSearch {
             max_breadth: bounded_count(request.max_breadth, MAX_CRAWL_BREADTH),
             max_depth: bounded_count(request.max_depth, MAX_CRAWL_DEPTH),
             limit: DEFAULT_CRAWL_LIMIT,
+            text_budget_bytes: MAX_CRAWL_TEXT_BYTES,
         };
         Ok(Json(run_crawl(&self.crawler, plan, &span).await))
     }
@@ -274,6 +277,7 @@ impl WebSearch {
             max_breadth: bounded_count(request.max_breadth, MAX_CRAWL_BREADTH),
             max_depth: bounded_count(request.max_depth, MAX_CRAWL_DEPTH),
             limit: bounded_count(request.limit, MAX_CRAWL_LIMIT),
+            text_budget_bytes: MAX_CRAWL_TEXT_BYTES,
         };
         Ok(Json(run_crawl(&self.crawler, plan, &span).await))
     }
@@ -349,6 +353,7 @@ fn crawl_span(name: &'static str) -> tracing::Span {
         crawl.timed_out = field::Empty,
         crawl.scored_irrelevant = field::Empty,
         crawl.scoring_failures = field::Empty,
+        crawl.text_budget_spent = field::Empty,
     )
 }
 

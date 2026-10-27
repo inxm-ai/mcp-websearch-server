@@ -31,6 +31,10 @@ pub const DEFAULT_CRAWL_LIMIT: usize = 50;
 pub const MAX_CRAWL_BREADTH: usize = 50;
 pub const MAX_CRAWL_DEPTH: usize = 5;
 pub const MAX_CRAWL_LIMIT: usize = 200;
+/// Page text one crawl keeps across all pages. With pages cut to 5,000
+/// characters it is never reached; it bounds `full_content` crawls, whose
+/// pages can each hold megabytes.
+pub const MAX_CRAWL_TEXT_BYTES: usize = 20 * 1024 * 1024;
 /// With `instructions`, this share of the crawl's time is kept for scoring.
 const SCORING_SHARE_DIVISOR: u32 = 4;
 /// The crawl deadline grows with the pages it may read, between a floor
@@ -57,6 +61,7 @@ const WWW_PREFIX: &str = "www.";
 const ROBOTS_DISALLOWED: &str = "disallowed by robots.txt";
 const ROBOTS_UNAVAILABLE: &str = "robots.txt could not be read; the site is not crawled";
 const CRAWL_TIMED_OUT: &str = "crawl timed out";
+const TEXT_BUDGET_SPENT: &str = "not read: the crawl's text budget is spent";
 
 const RELEVANCE_SYSTEM_PROMPT: &str = "You decide whether a web page is relevant to a crawl's \
     instructions. Answer with exactly one word: yes or no.";
@@ -73,6 +78,8 @@ pub struct CrawlPlan {
     pub max_breadth: usize,
     pub max_depth: usize,
     pub limit: usize,
+    /// Most bytes of page text the crawl keeps; reaching it ends the crawl.
+    pub text_budget_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -304,20 +311,38 @@ fn scores_pages(plan: &CrawlPlan) -> bool {
         .is_some_and(|text| !text.trim().is_empty())
 }
 
-fn to_extracted(page: &Page, full_content: bool) -> ExtractedPage {
+/// What the crawl keeps of a page once its links are queued: its URL and
+/// the text it returns, nothing else.
+struct KeptPage {
+    url: Url,
+    text: String,
+}
+
+fn to_extracted(page: KeptPage) -> ExtractedPage {
     ExtractedPage {
-        text: truncate(&page.text, full_content),
+        text: page.text,
         url: page.url.to_string(),
         favicon: String::new(),
     }
 }
 
-fn truncate(text: &str, full_content: bool) -> String {
-    if full_content {
-        text.to_string()
-    } else {
-        text.chars().take(TRUNCATED_TEXT_CHARS).collect()
+/// Cuts `text` to its first `chars` characters, in place.
+fn keep_chars(text: &mut String, chars: usize) {
+    if let Some((end, _)) = text.char_indices().nth(chars) {
+        text.truncate(end);
     }
+}
+
+/// Cuts `text` to at most `bytes` bytes, at a character boundary, in place.
+fn keep_bytes(text: &mut String, bytes: usize) {
+    if text.len() <= bytes {
+        return;
+    }
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
 }
 
 /// A crawl's result plus what telemetry records about it.
@@ -330,6 +355,8 @@ pub struct CrawlOutcome {
     pub scored_irrelevant: usize,
     /// Pages kept unscored because the model failed.
     pub scoring_failures: usize,
+    /// The text budget ran out and ended the crawl.
+    pub text_budget_spent: bool,
 }
 
 /// The crawler's ports and shared state.
@@ -345,7 +372,9 @@ impl Crawler {
     /// page limit or `deadline` runs out.
     pub async fn crawl(&self, plan: &CrawlPlan, deadline: Instant) -> CrawlOutcome {
         let mut failed: Vec<FailedUrl> = Vec::new();
-        let mut pages: Vec<Page> = Vec::new();
+        let mut pages: Vec<KeptPage> = Vec::new();
+        let mut kept_bytes = 0;
+        let mut text_budget_spent = false;
         let mut timed_out = false;
         let mut pages_read = 0;
         let start = match Url::parse(plan.start_url.trim()) {
@@ -362,6 +391,7 @@ impl Crawler {
                     },
                     pages_read,
                     timed_out,
+                    text_budget_spent,
                     scored_irrelevant: 0,
                     scoring_failures: 0,
                 };
@@ -453,10 +483,24 @@ impl Crawler {
                 Ok(Ok(page)) => page,
             };
             seen.insert(page.url.to_string());
-            if depth < plan.max_depth {
+            let Page {
+                url: page_url,
+                mut text,
+                links,
+                ..
+            } = page;
+            // Keep only what is returned: the cut text, within the budget.
+            if !plan.full_content {
+                keep_chars(&mut text, TRUNCATED_TEXT_CHARS);
+            }
+            let budget_left = plan.text_budget_bytes.saturating_sub(kept_bytes);
+            text_budget_spent = text.len() >= budget_left;
+            keep_bytes(&mut text, budget_left);
+            kept_bytes += text.len();
+            if !text_budget_spent && depth < plan.max_depth {
                 // The frontier never holds more than the pages left to read.
                 let room = plan.limit.saturating_sub(pages_read + queue.len());
-                for link in next_links(&page.links, plan, &start_site, &seen)
+                for link in next_links(&links, plan, &start_site, &seen)
                     .into_iter()
                     .take(room)
                 {
@@ -464,7 +508,18 @@ impl Crawler {
                     queue.push_back((link, depth + 1));
                 }
             }
-            pages.push(page);
+            drop(links);
+            pages.push(KeptPage {
+                url: page_url,
+                text,
+            });
+            if text_budget_spent {
+                failed.extend(queue.drain(..).map(|(url, _)| FailedUrl {
+                    url: url.to_string(),
+                    error: TEXT_BUDGET_SPENT.to_string(),
+                }));
+                break;
+            }
         }
 
         let (extracted, scored_irrelevant, scoring_failures, scoring_timed_out) =
@@ -475,6 +530,7 @@ impl Crawler {
             timed_out: timed_out || scoring_timed_out,
             scored_irrelevant,
             scoring_failures,
+            text_budget_spent,
         }
     }
 
@@ -486,7 +542,7 @@ impl Crawler {
     async fn score(
         &self,
         plan: &CrawlPlan,
-        pages: Vec<Page>,
+        pages: Vec<KeptPage>,
         deadline: Instant,
     ) -> (Vec<ExtractedPage>, usize, usize, bool) {
         let Some(instructions) = plan
@@ -494,10 +550,7 @@ impl Crawler {
             .as_deref()
             .filter(|text| !text.trim().is_empty())
         else {
-            let extracted = pages
-                .iter()
-                .map(|page| to_extracted(page, plan.full_content))
-                .collect();
+            let extracted = pages.into_iter().map(to_extracted).collect();
             return (extracted, 0, 0, false);
         };
         // `None`: the deadline came before this page was scored.
@@ -528,18 +581,18 @@ impl Crawler {
         let mut extracted = Vec::new();
         let mut irrelevant = 0;
         let mut failures = 0;
-        for (page, verdict) in pages.iter().zip(verdicts) {
+        for (page, verdict) in pages.into_iter().zip(verdicts) {
             match verdict {
-                Some(Ok(true)) => extracted.push(to_extracted(page, plan.full_content)),
+                Some(Ok(true)) => extracted.push(to_extracted(page)),
                 Some(Ok(false)) => irrelevant += 1,
                 Some(Err(error)) => {
                     tracing::warn!(url = %page.url, error = %error, "relevance scoring failed; page kept");
                     failures += 1;
-                    extracted.push(to_extracted(page, plan.full_content));
+                    extracted.push(to_extracted(page));
                 }
                 None => {
                     failures += 1;
-                    extracted.push(to_extracted(page, plan.full_content));
+                    extracted.push(to_extracted(page));
                 }
             }
         }
