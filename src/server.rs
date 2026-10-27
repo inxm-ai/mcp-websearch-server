@@ -17,9 +17,10 @@ use crate::contract::{
     DownloadRequest, DownloadedFile, ExtractRequest, ExtractResponse, SearchRequest, SearchResponse,
 };
 use crate::download::download;
-use crate::extract::{extract_urls, PageReader};
+use crate::extract::{extract_urls, PageReader, Renderer};
 use crate::fetch::HttpFetcher;
 use crate::http_fetch_adapter::ReqwestFetcher;
+use crate::render_adapter::StygianRenderer;
 use crate::search::{run_search, SearchCache, SearchEngine, CACHE_TTL};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
@@ -42,10 +43,18 @@ impl WebSearch {
     /// Builds the server and its adapters from `config`.
     pub fn new(config: &Config) -> anyhow::Result<Self> {
         let http: Arc<dyn HttpFetcher> = Arc::new(ReqwestFetcher::new()?);
+        let renderer: Option<Arc<dyn Renderer>> = if config.render_enabled {
+            Some(Arc::new(StygianRenderer::new(
+                config.render_pool_size,
+                config.render_timeout,
+            )))
+        } else {
+            None
+        };
         Ok(Self {
             search_engine: Arc::new(SearxngClient::new(&config.searxng_url)?),
             search_cache: Arc::new(SearchCache::new(CACHE_TTL)),
-            page_reader: Arc::new(PageReader::new(http.clone())),
+            page_reader: Arc::new(PageReader::new(http.clone(), renderer)),
             http,
         })
     }
@@ -106,6 +115,7 @@ impl WebSearch {
             tool.latency_ms = field::Empty,
             extract.url_count = request.urls.len(),
             extract.stage.http = field::Empty,
+            extract.stage.render = field::Empty,
             extract.stage.failed = field::Empty,
         );
         let started = Instant::now();
@@ -114,6 +124,7 @@ impl WebSearch {
             .await;
         record_latency(&span, started);
         span.record("extract.stage.http", counts.http);
+        span.record("extract.stage.render", counts.render);
         span.record("extract.stage.failed", counts.failed);
         Ok(Json(response))
     }

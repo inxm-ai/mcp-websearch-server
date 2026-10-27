@@ -2,12 +2,14 @@
 //! needs-render decision, content types, failures and result shape.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use mcp_websearch_server::download::{download, encode_file, DownloadFailure, MAX_DOWNLOAD_BYTES};
 use mcp_websearch_server::extract::{
-    content_kind, extract_urls, needs_render, ContentKind, PageReader,
+    content_kind, extract_urls, needs_render, ContentKind, ExtractStage, PageReader, RenderError,
+    RenderedPage, Renderer,
 };
 use mcp_websearch_server::fetch::{FetchError, FetchedBody, HttpFetcher};
 use url::Url;
@@ -97,7 +99,7 @@ async fn extract_reports_pages_and_typed_failures_in_request_order() {
             " plain notes ",
         ),
     ]);
-    let reader = PageReader::new(Arc::new(http));
+    let reader = PageReader::new(Arc::new(http), None);
     let urls: Vec<String> = [
         "https://news.example/a",
         "http://10.0.0.1/admin",
@@ -188,4 +190,98 @@ async fn downloads_refuse_private_addresses_and_oversized_files() {
         .await
         .unwrap_or_else(|error| panic!("download failed: {error}"));
     assert_eq!(file.content, "a,b\n1,2\n");
+}
+
+/// Renders from a script and counts how often it was asked.
+struct ScriptedRenderer {
+    answer: Result<String, RenderError>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedRenderer {
+    fn new(answer: Result<&str, RenderError>) -> Arc<Self> {
+        Arc::new(Self {
+            answer: answer.map(str::to_string),
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl Renderer for ScriptedRenderer {
+    async fn render(&self, url: &Url) -> Result<RenderedPage, RenderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.answer.clone().map(|html| RenderedPage {
+            final_url: url.clone(),
+            html,
+        })
+    }
+}
+
+fn reader_with(renderer: &Arc<ScriptedRenderer>, page_html: &str) -> PageReader {
+    let http = ScriptedHttp::new(&[("https://app.example/news", 200, "text/html", page_html)]);
+    PageReader::new(Arc::new(http), Some(renderer.clone() as Arc<dyn Renderer>))
+}
+
+#[tokio::test]
+async fn a_script_shell_is_read_from_the_rendered_page() {
+    let renderer = ScriptedRenderer::new(Ok(&format!(
+        "<html><body><main><p>{PROSE}</p></main></body></html>"
+    )));
+    let reader = reader_with(&renderer, "<div id=root></div><script src=app.js></script>");
+
+    let page = reader
+        .read("https://app.example/news")
+        .await
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+
+    assert_eq!(page.stage, ExtractStage::Render);
+    assert_eq!(page.text, PROSE);
+}
+
+#[tokio::test]
+async fn a_readable_page_is_never_rendered() {
+    let renderer = ScriptedRenderer::new(Ok("<p>rendered</p>"));
+    let reader = reader_with(&renderer, &format!("<p>{PROSE}</p>"));
+
+    let page = reader
+        .read("https://app.example/news")
+        .await
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+
+    assert_eq!(page.stage, ExtractStage::Http);
+    assert_eq!(renderer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_failed_render_keeps_short_http_text_or_reports_why() {
+    let renderer = ScriptedRenderer::new(Err(RenderError::Timeout));
+
+    let short = reader_with(&renderer, "<p>Opening hours: 9 to 5.</p>")
+        .read("https://app.example/news")
+        .await
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+    assert_eq!(
+        (short.stage, short.text.as_str()),
+        (ExtractStage::Http, "Opening hours: 9 to 5.")
+    );
+
+    let shell = reader_with(&renderer, "<div id=root></div>")
+        .read("https://app.example/news")
+        .await;
+    assert_eq!(
+        shell.map_err(|failure| failure.to_string()),
+        Err("no readable text without rendering, and rendering failed: timed out".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_render_with_less_text_than_http_keeps_the_http_text() {
+    let renderer = ScriptedRenderer::new(Ok("<p>Cookie wall</p>"));
+    let reader = reader_with(&renderer, "<p>Opening hours: 9 to 5, Monday to Friday.</p>");
+    let page = reader
+        .read("https://app.example/news")
+        .await
+        .unwrap_or_else(|error| panic!("read failed: {error}"));
+    assert_eq!(page.stage, ExtractStage::Http);
 }

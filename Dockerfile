@@ -18,5 +18,12 @@ RUN cargo build --release --locked
 # the new bridge before it deploys. The reference stays literal because
 # Dependabot doesn't read it through ARG variables.
 FROM ghcr.io/inxm-ai/enterprise-mcp-bridge:latest@sha256:ff35f3ee3081e1d403852b80bd84be7129c060ab846087eddc330536ab2ae94e
+# Chromium for the render stage of `extract` and the crawlers (stygian-browser
+# drives it over CDP). Debian's package follows the security updates of the
+# bridge's base release; fonts-liberation gives pages a usable default font.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends chromium fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+ENV STYGIAN_CHROME_PATH=/usr/bin/chromium
 COPY --from=builder /build/target/release/mcp-websearch /usr/local/bin/mcp-websearch
 RUN chmod +x /usr/local/bin/mcp-websearch

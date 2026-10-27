@@ -13,6 +13,7 @@ pub mod extract;
 pub mod fetch;
 pub mod html;
 pub mod http_fetch_adapter;
+pub mod render_adapter;
 pub mod search;
 pub mod searxng_adapter;
 pub mod server;

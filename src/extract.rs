@@ -1,8 +1,11 @@
-//! `extract`: reads pages as readable text. Stage one is a plain HTTP GET;
-//! a page whose HTML holds no readable body is reported as such.
+//! `extract`: reads pages as readable text in two stages. Stage one is a
+//! plain HTTP GET; only when its HTML holds no readable body (empty,
+//! boilerplate only, or a JavaScript app shell) is the page rendered in a
+//! browser (stage two) and read again.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use tracing::{field, Instrument};
 use url::Url;
@@ -30,18 +33,21 @@ const SCRIPT_REQUIRED_PHRASES: &[&str] = &[
 /// that happens to mention it.
 const SHELL_TEXT_MAX_CHARS: usize = 1_000;
 
-/// Which stage produced a page's text, recorded per URL on the tool span.
+/// Which stage produced a page's text, recorded per URL on its span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractStage {
     Http,
-    Failed,
+    Render,
 }
+
+/// `extract.stage` of a URL that yielded no text.
+pub const FAILED_STAGE: &str = "failed";
 
 impl ExtractStage {
     pub fn as_str(self) -> &'static str {
         match self {
             ExtractStage::Http => "http",
-            ExtractStage::Failed => "failed",
+            ExtractStage::Render => "render",
         }
     }
 }
@@ -63,6 +69,8 @@ pub enum ExtractFailure {
     Timeout,
     #[error("network error: {0}")]
     Network(String),
+    #[error("no readable text without rendering, and rendering failed: {0}")]
+    RenderFailed(RenderError),
 }
 
 impl From<FetchError> for ExtractFailure {
@@ -117,6 +125,34 @@ pub fn needs_render(text: &str) -> bool {
             .any(|phrase| lowered.contains(phrase))
 }
 
+/// A page as the browser left it after scripts ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPage {
+    pub final_url: Url,
+    pub html: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RenderError {
+    #[error("renderer unavailable: {0}")]
+    Unavailable(String),
+    #[error("refused: {0}")]
+    Refused(Refusal),
+    #[error("timed out")]
+    Timeout,
+    /// The page itself answered with an error (often bot protection).
+    #[error("HTTP status {0}")]
+    HttpStatus(u16),
+    #[error("browser error: {0}")]
+    Browser(String),
+}
+
+/// Stage two: loads a page in a browser under the same address policy.
+#[async_trait]
+pub trait Renderer: Send + Sync {
+    async fn render(&self, url: &Url) -> Result<RenderedPage, RenderError>;
+}
+
 /// A page read to text, with the links it holds (for crawling).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
@@ -126,14 +162,16 @@ pub struct Page {
     pub stage: ExtractStage,
 }
 
-/// Reads pages through the address policy.
+/// Reads pages through the address policy: HTTP first, the renderer (when
+/// configured) for pages HTTP cannot read.
 pub struct PageReader {
     http: Arc<dyn HttpFetcher>,
+    renderer: Option<Arc<dyn Renderer>>,
 }
 
 impl PageReader {
-    pub fn new(http: Arc<dyn HttpFetcher>) -> Self {
-        Self { http }
+    pub fn new(http: Arc<dyn HttpFetcher>, renderer: Option<Arc<dyn Renderer>>) -> Self {
+        Self { http, renderer }
     }
 
     /// Reads `url` to text, recording which stage answered on an
@@ -144,13 +182,14 @@ impl PageReader {
             url.full = %url,
             extract.stage = field::Empty,
             extract.error = field::Empty,
+            extract.render_error = field::Empty,
         );
         let result = self.read_unrecorded(url).instrument(span.clone()).await;
         match &result {
             Ok(page) => span.record("extract.stage", page.stage.as_str()),
             Err(failure) => {
                 span.record("extract.error", failure.to_string());
-                span.record("extract.stage", ExtractStage::Failed.as_str())
+                span.record("extract.stage", FAILED_STAGE)
             }
         };
         result
@@ -176,18 +215,58 @@ impl PageReader {
                 stage: ExtractStage::Http,
             }),
             ContentKind::Html => {
-                let text = readable_text(&body);
-                if text.is_empty() {
-                    return Err(ExtractFailure::NoReadableText);
-                }
-                Ok(Page {
+                let http_page = Page {
+                    text: readable_text(&body),
                     links: links(&body, &fetched.final_url),
-                    text,
                     url: fetched.final_url,
                     stage: ExtractStage::Http,
-                })
+                };
+                if !needs_render(&http_page.text) {
+                    return Ok(http_page);
+                }
+                self.render_or_keep(http_page).await
             }
         }
+    }
+
+    /// Stage two for a page HTTP could not read: the rendered page when it
+    /// has more text, otherwise whatever HTTP found; no text at all is a
+    /// failure.
+    async fn render_or_keep(&self, http_page: Page) -> Result<Page, ExtractFailure> {
+        let Some(renderer) = &self.renderer else {
+            return non_empty(http_page);
+        };
+        match renderer.render(&http_page.url).await {
+            Ok(rendered) => {
+                let text = readable_text(&rendered.html);
+                if text.chars().count() > http_page.text.chars().count() {
+                    Ok(Page {
+                        links: links(&rendered.html, &rendered.final_url),
+                        text,
+                        url: rendered.final_url,
+                        stage: ExtractStage::Render,
+                    })
+                } else {
+                    non_empty(http_page)
+                }
+            }
+            Err(error) => {
+                tracing::Span::current().record("extract.render_error", error.to_string());
+                if http_page.text.is_empty() {
+                    Err(ExtractFailure::RenderFailed(error))
+                } else {
+                    Ok(http_page)
+                }
+            }
+        }
+    }
+}
+
+fn non_empty(page: Page) -> Result<Page, ExtractFailure> {
+    if page.text.is_empty() {
+        Err(ExtractFailure::NoReadableText)
+    } else {
+        Ok(page)
     }
 }
 
@@ -195,6 +274,7 @@ impl PageReader {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageCounts {
     pub http: usize,
+    pub render: usize,
     pub failed: usize,
 }
 
@@ -218,7 +298,10 @@ pub async fn extract_urls(reader: &PageReader, urls: &[String]) -> (ExtractRespo
     for (requested_url, outcome) in outcomes {
         match outcome {
             Ok(page) => {
-                counts.http += 1;
+                match page.stage {
+                    ExtractStage::Http => counts.http += 1,
+                    ExtractStage::Render => counts.render += 1,
+                }
                 response.extracted.push(ExtractedPage {
                     text: page.text,
                     url: requested_url,

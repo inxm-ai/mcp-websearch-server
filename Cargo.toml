@@ -25,6 +25,9 @@ unsafe_code = "forbid"
 anyhow = ">=1,<2"
 async-trait = ">=0.1,<0.2"
 base64 = ">=0.23,<0.24"
+# Pinned to the exact chromiumoxide stygian-browser 0.17.0 pins, so the CDP
+# types used for request interception are the ones the pool speaks.
+chromiumoxide = { version = "=0.9.1", default-features = false }
 ego-tree = ">=0.11,<0.12"
 futures = ">=0.3,<0.4"
 reqwest = { version = ">=0.13,<0.14", default-features = false, features = ["rustls", "json", "query", "gzip", "brotli", "deflate"] }
@@ -33,6 +36,11 @@ schemars = ">=1,<2"
 scraper = ">=0.29,<0.30"
 serde = { version = ">=1,<2", features = ["derive"] }
 serde_json = ">=1,<2"
+# AGPL-3.0-only (this repository's licence follows from it). Single-maintainer
+# crate: pinned exactly; vendor it if a bump breaks the build. Its default
+# `stealth` feature stays on only because 0.17.0 does not compile without it;
+# the renderer runs with `StealthLevel::None`, which injects nothing.
+stygian-browser = "=0.17.0"
 thiserror = ">=2,<3"
 tokio = { version = ">=1.40,<2", features = ["rt-multi-thread", "macros", "io-std", "time", "sync"] }
 tracing = ">=0.1,<0.2"
