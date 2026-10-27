@@ -51,6 +51,29 @@ pub fn check_url(url: &Url) -> Result<(), Refusal> {
     }
 }
 
+/// Stands in for input that is not a URL, which may hold anything.
+const UNPARSEABLE_URL: &str = "<not a URL>";
+
+pub fn loggable_url(url: &str) -> String {
+    match Url::parse(url.trim()) {
+        Ok(mut parsed) if parsed.host().is_some() => {
+            if parsed.set_username("").is_ok() && parsed.set_password(None).is_ok() {
+                parsed.to_string()
+            } else {
+                hostless(&parsed)
+            }
+        }
+        // Without a host there is no authority to strip credentials from,
+        // and the rest may hold them (`user:secret@…` parses as a scheme).
+        Ok(parsed) => hostless(&parsed),
+        Err(_) => UNPARSEABLE_URL.to_string(),
+    }
+}
+
+fn hostless(url: &Url) -> String {
+    format!("<{} URL>", url.scheme())
+}
+
 fn public_or_refused(ip: IpAddr) -> Result<(), Refusal> {
     if is_public_ip(ip) {
         Ok(())

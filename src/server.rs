@@ -14,6 +14,7 @@ use rmcp::{
 };
 use tracing::{field, Instrument};
 
+use crate::address_policy::loggable_url;
 use crate::config::Config;
 use crate::contract::{
     CrawlCompanyRequest, CrawlRequest, DownloadRequest, DownloadedFile, ExtractRequest,
@@ -218,7 +219,7 @@ impl WebSearch {
         let span = tracing::info_span!(
             "tool.download_file",
             tool.latency_ms = field::Empty,
-            url.full = %request.url,
+            url.full = %loggable_url(&request.url),
         );
         let started = Instant::now();
         let file = download(self.http.as_ref(), &request.url)

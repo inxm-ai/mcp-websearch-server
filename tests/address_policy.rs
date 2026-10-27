@@ -2,7 +2,7 @@
 
 use core::net::IpAddr;
 
-use mcp_websearch_server::address_policy::{check_url, is_public_ip, Refusal};
+use mcp_websearch_server::address_policy::{check_url, is_public_ip, loggable_url, Refusal};
 use url::Url;
 
 fn checked(url: &str) -> Result<(), Refusal> {
@@ -106,4 +106,15 @@ fn only_globally_routable_addresses_are_public() {
 #[test]
 fn refusals_read_as_the_issue_specifies() {
     assert_eq!(Refusal::PrivateAddress.to_string(), "private address");
+}
+
+#[test]
+fn logged_urls_carry_no_credentials() {
+    assert_eq!(
+        loggable_url(" https://user:secret@example.com/a?b=1 "),
+        "https://example.com/a?b=1"
+    );
+    assert_eq!(loggable_url("https://example.com/"), "https://example.com/");
+    assert_eq!(loggable_url("user:secret@not a url"), "<user URL>");
+    assert_eq!(loggable_url("::"), "<not a URL>");
 }

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use tracing::{field, Instrument};
 use url::Url;
 
-use crate::address_policy::{check_url, Refusal};
+use crate::address_policy::{check_url, loggable_url, Refusal};
 use crate::contract::{ExtractResponse, ExtractedPage, FailedUrl};
 use crate::fetch::{FetchError, HttpFetcher};
 use crate::html::{links, readable_text};
@@ -179,7 +179,7 @@ impl PageReader {
     pub async fn read(&self, url: &str) -> Result<Page, ExtractFailure> {
         let span = tracing::info_span!(
             "extract.page",
-            url.full = %url,
+            url.full = %loggable_url(url),
             extract.stage = field::Empty,
             extract.error = field::Empty,
             extract.render_error = field::Empty,

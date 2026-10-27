@@ -30,7 +30,7 @@ use tokio::sync::OnceCell;
 use tracing::Instrument;
 use url::Url;
 
-use crate::address_policy::{check_url, is_public_ip, Refusal};
+use crate::address_policy::{check_url, is_public_ip, loggable_url, Refusal};
 use crate::extract::{RenderError, RenderedPage, Renderer};
 
 /// Warm browsers kept once the pool exists; more start on demand up to the
@@ -186,7 +186,7 @@ async fn guard_requests(
                 match refusal_for(&event.request.url, &mut resolved).await {
                     None => Ok(()),
                     Some(refusal) => {
-                        tracing::info!(url = %event.request.url, %refusal, "render request refused");
+                        tracing::info!(url = %loggable_url(&event.request.url), %refusal, "render request refused");
                         if event.resource_type == CdpResourceType::Document {
                             recorded_refusal
                                 .lock()
