@@ -47,6 +47,13 @@ searxng:
     tag: "2026.10.27-ef7bae9dd"
     pullPolicy: IfNotPresent
   port: 8080
+  # The language every search runs in; the tools take none (their schemas
+  # are tavily's). SearXNG's own default, auto, follows the client's
+  # Accept-Language, and the MCP server sends none, so it fell back to all:
+  # Bing then gets no market at all and picks one itself, which from a
+  # datacenter IP was Chinese for queries such as "inxm". en gives every
+  # engine a market (Bing en-us, DuckDuckGo us-en, Brave us).
+  defaultLanguage: en
   # Google proper answers "access denied" from datacenter and residential
   # IPs alike, so it stays off; these are the engines that answer.
   engines:

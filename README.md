@@ -26,7 +26,9 @@ credentials or cookies are carried between pages.
 - **SearXNG** (`SEARXNG_URL`, default `http://mcp-websearch-server-searxng:8080`):
   upstream image, deployed by this chart (`searxng.enabled`) with a
   `settings.yml` that enables the JSON API and Brave, DuckDuckGo, Bing, Bing
-  News and Google News.
+  News and Google News, and runs every search in `searxng.defaultLanguage`
+  (default `en`): with SearXNG's own default, Bing gets no market and can
+  answer in another language.
 - **Chromium** ships in the image and renders with its own sandbox on: the
   server runs as a non-root user (UID 10001), and with `render.enabled` the
   chart lets the pod create the user namespaces that sandbox needs (seccomp

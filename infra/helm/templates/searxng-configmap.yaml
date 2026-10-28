@@ -20,6 +20,8 @@ data:
       instance_name: {{ .Values.appName }}
     search:
       safe_search: 0
+      # See searxng.defaultLanguage in values.yaml.
+      default_lang: {{ required "searxng.defaultLanguage is required" .Values.searxng.defaultLanguage | quote }}
       formats:
         - html
         - json
