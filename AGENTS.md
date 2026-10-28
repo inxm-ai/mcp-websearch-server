@@ -120,6 +120,11 @@ generated from the template. -->
   constructs the adapter and injects it.
   The architecture fitness test enforces this for modules named `*_adapter`.
 
+- **Failed tool calls show as errors in traces.** Every `tool.*` span
+  declares `otel.status_code` and `error.type`, and every path that returns
+  a `ToolFailure` goes through `failed()` in `server.rs`, which sets both.
+  README's Telemetry table lists each span's attributes; keep it in step.
+
 - **Detached tasks preserve tracing context.** `tokio::spawn` and equivalent
   runtime spawns must wrap the complete future in `.instrument(task_span)`.
   Otherwise the task's telemetry becomes an orphan trace root. The harness
