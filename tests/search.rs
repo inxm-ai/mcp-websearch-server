@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mcp_websearch_server::contract::{SearchRequest, TimeRange, Topic, DEFAULT_NEWS_DAYS};
 use mcp_websearch_server::search::{
-    effective_time_range, engine_queries, merge_results, run_search, snippet, Category,
-    EngineQuery, EngineResponse, EngineResult, SearchCache, SearchEngine, SearchError,
-    CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
+    effective_time_range, engine_queries, language, merge_results, run_search, snippet, Category,
+    EngineQuery, EngineResponse, EngineResult, InvalidLanguage, SearchCache, SearchEngine,
+    SearchError, CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
 };
 
 fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRequest {
@@ -20,6 +20,7 @@ fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRe
         days: DEFAULT_NEWS_DAYS,
         start_date: None,
         end_date: None,
+        language: None,
     }
 }
 
@@ -35,10 +36,11 @@ fn hit(url: &str, published: Option<&str>) -> EngineResult {
 #[test]
 fn general_topic_searches_only_the_general_category() {
     assert_eq!(
-        engine_queries(Topic::General, Some(TimeRange::Week)),
+        engine_queries(Topic::General, Some(TimeRange::Week), None),
         vec![EngineQuery {
             category: Category::General,
             time_range: Some(TimeRange::Week),
+            language: None,
         }]
     );
 }
@@ -46,15 +48,17 @@ fn general_topic_searches_only_the_general_category() {
 #[test]
 fn news_topic_searches_news_then_general_in_the_same_range() {
     assert_eq!(
-        engine_queries(Topic::News, Some(TimeRange::Day)),
+        engine_queries(Topic::News, Some(TimeRange::Day), Some("de")),
         vec![
             EngineQuery {
                 category: Category::News,
                 time_range: Some(TimeRange::Day),
+                language: Some("de".into()),
             },
             EngineQuery {
                 category: Category::General,
                 time_range: Some(TimeRange::Day),
+                language: Some("de".into()),
             },
         ]
     );
@@ -146,6 +150,7 @@ fn cache_entries_expire_after_their_ttl() {
         query: "q".into(),
         topic: Topic::General,
         time_range: None,
+        language: None,
     };
     let response = mcp_websearch_server::contract::SearchResponse {
         query: "q".into(),
@@ -178,7 +183,7 @@ impl SearchEngine for ScriptedEngine {
         self.calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(engine_query);
+            .push(engine_query.clone());
         let scripted = match engine_query.category {
             Category::News => &self.news,
             Category::General => &self.general,
@@ -195,11 +200,101 @@ impl SearchEngine for ScriptedEngine {
 
 impl ScriptedEngine {
     fn call_count(&self) -> usize {
+        self.calls().len()
+    }
+
+    fn calls(&self) -> Vec<EngineQuery> {
         self.calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+            .clone()
     }
+}
+
+#[test]
+fn language_takes_a_code_with_an_optional_region_and_normalises_case() {
+    let cases = [
+        (None, None),
+        (Some(""), None),
+        (Some("  "), None),
+        (Some("de"), Some("de")),
+        (Some(" DE "), Some("de")),
+        (Some("de-DE"), Some("de-DE")),
+        (Some("de_de"), Some("de-DE")),
+        (Some("EN-gb"), Some("en-GB")),
+        (Some("all"), Some("all")),
+    ];
+    for (raw, expected) in cases {
+        assert_eq!(
+            language(raw),
+            Ok(expected.map(str::to_string)),
+            "language({raw:?})"
+        );
+    }
+}
+
+#[test]
+fn language_refuses_what_searxng_would_not_read() {
+    for raw in [
+        "german", "d", "de-DEU", "de-D3", "d3", "de-DE-x", "auto", "de DE", "-DE",
+    ] {
+        assert_eq!(
+            language(Some(raw)),
+            Err(InvalidLanguage(raw.to_string())),
+            "language({raw:?})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_language_reaches_every_searxng_query_of_a_search() {
+    let engine = ScriptedEngine {
+        news: Ok(vec![hit("https://news.example/1", None)]),
+        general: Ok(vec![hit("https://web.example/1", None)]),
+        calls: Mutex::new(Vec::new()),
+    };
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
+    let german = SearchRequest {
+        language: Some("de".into()),
+        ..request("Bundesliga", Topic::News, None)
+    };
+    run_search(&engine, &cache, &german, Instant::now())
+        .await
+        .unwrap_or_else(|error| panic!("search failed: {error}"));
+    let languages: Vec<Option<String>> = engine
+        .calls()
+        .into_iter()
+        .map(|call| call.language)
+        .collect();
+    assert_eq!(
+        languages,
+        vec![Some("de".to_string()), Some("de".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_search_in_another_language_is_not_answered_from_the_cache() {
+    let engine = ScriptedEngine {
+        news: Ok(Vec::new()),
+        general: Ok(vec![hit("https://web.example/1", None)]),
+        calls: Mutex::new(Vec::new()),
+    };
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
+    let now = Instant::now();
+    let english = request("inxm", Topic::General, None);
+    let german = SearchRequest {
+        language: Some("de".into()),
+        ..english.clone()
+    };
+
+    let first = run_search(&engine, &cache, &english, now).await;
+    let second = run_search(&engine, &cache, &german, now).await;
+    let third = run_search(&engine, &cache, &german, now).await;
+
+    assert!(!first.unwrap_or_else(|error| panic!("{error}")).cache_hit);
+    assert!(!second.unwrap_or_else(|error| panic!("{error}")).cache_hit);
+    assert!(third.unwrap_or_else(|error| panic!("{error}")).cache_hit);
+    assert_eq!(engine.call_count(), 2);
 }
 
 #[tokio::test]
@@ -290,6 +385,7 @@ fn cache_key(query: &str) -> mcp_websearch_server::search::CacheKey {
         query: query.into(),
         topic: Topic::General,
         time_range: None,
+        language: None,
     }
 }
 

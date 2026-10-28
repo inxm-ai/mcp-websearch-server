@@ -34,9 +34,15 @@ use crate::llm_adapter::{TgiChatModel, UnconfiguredModel};
 use crate::model::ChatModel;
 use crate::render_adapter::StygianRenderer;
 use crate::research::{Phase, ProgressSink, Researcher};
-use crate::search::{run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
+use crate::search::{language, run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
+
+/// A tool's `language` argument as SearXNG spells it; a malformed one is the
+/// caller's to fix.
+fn checked_language(raw: Option<&str>) -> Result<Option<String>, ToolFailure> {
+    language(raw).map_err(|error| ToolFailure::new(FailureKind::InvalidArgument, error.to_string()))
+}
 
 /// Records how long the tool call took on its span.
 fn record_latency(span: &tracing::Span, started: Instant) {
@@ -148,6 +154,10 @@ impl WebSearch {
         &self,
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<Json<SearchResponse>, ToolFailure> {
+        let request = SearchRequest {
+            language: checked_language(request.language.as_deref())?,
+            ..request
+        };
         let span = tracing::info_span!(
             "tool.search",
             tool.latency_ms = field::Empty,
@@ -304,6 +314,7 @@ impl WebSearch {
             research.source_count = field::Empty,
         );
         let model = request.model.unwrap_or_default();
+        let language = checked_language(request.language.as_deref())?;
         span.record("research.model", format!("{model:?}").to_lowercase());
         let progress = PeerProgress {
             peer,
@@ -312,7 +323,7 @@ impl WebSearch {
         let started = Instant::now();
         let result = self
             .researcher
-            .research(&request.input, model, &progress)
+            .research(&request.input, model, language.as_deref(), &progress)
             .instrument(span.clone())
             .await;
         record_latency(&span, started);

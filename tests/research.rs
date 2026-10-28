@@ -164,7 +164,7 @@ async fn research_cites_only_pages_that_were_read() {
     let progress = RecordedProgress::default();
 
     let result = researcher
-        .research("state of AI adoption", ResearchModel::Mini, &progress)
+        .research("state of AI adoption", ResearchModel::Mini, None, &progress)
         .await
         .unwrap_or_else(|error| panic!("research failed: {error}"));
 
@@ -224,7 +224,12 @@ async fn research_reads_at_most_the_source_limit() {
     let researcher = researcher(model, &page_table, &url_refs);
 
     let result = researcher
-        .research("topic", ResearchModel::Mini, &RecordedProgress::default())
+        .research(
+            "topic",
+            ResearchModel::Mini,
+            None,
+            &RecordedProgress::default(),
+        )
         .await
         .unwrap_or_else(|error| panic!("research failed: {error}"));
 
@@ -237,7 +242,12 @@ async fn research_fails_when_nothing_could_be_read_or_the_model_is_down() {
     let unreadable = researcher(model, &[], &["https://down.example/a"]);
     assert_eq!(
         unreadable
-            .research("topic", ResearchModel::Mini, &RecordedProgress::default())
+            .research(
+                "topic",
+                ResearchModel::Mini,
+                None,
+                &RecordedProgress::default()
+            )
             .await,
         Err(ResearchFailure::NothingRead)
     );
@@ -248,8 +258,86 @@ async fn research_fails_when_nothing_could_be_read_or_the_model_is_down() {
     )]));
     assert_eq!(
         researcher(down, &[], &[])
-            .research("topic", ResearchModel::Pro, &RecordedProgress::default())
+            .research(
+                "topic",
+                ResearchModel::Pro,
+                None,
+                &RecordedProgress::default()
+            )
             .await,
         Err(ResearchFailure::Model(ModelError::NotConfigured))
+    );
+}
+
+/// A [`FixedEngine`] that also records each query's language.
+struct LanguageRecordingEngine {
+    inner: FixedEngine,
+    languages: Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait]
+impl SearchEngine for LanguageRecordingEngine {
+    async fn query(
+        &self,
+        query: &str,
+        engine_query: EngineQuery,
+    ) -> Result<EngineResponse, SearchError> {
+        self.languages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(engine_query.language.clone());
+        self.inner.query(query, engine_query).await
+    }
+}
+
+#[tokio::test]
+async fn research_searches_in_the_language_it_is_given() {
+    let article = format!("<p>{PROSE}</p>");
+    let engine = Arc::new(LanguageRecordingEngine {
+        inner: FixedEngine {
+            urls: vec!["https://ok.example/bericht".to_string()],
+        },
+        languages: Mutex::new(Vec::new()),
+    });
+    let researcher = Researcher {
+        search_engine: engine.clone(),
+        search_cache: Arc::new(SearchCache::new(CACHE_TTL, CACHE_CAPACITY)),
+        reader: Arc::new(PageReader::new(
+            Arc::new(ScriptedHttp::new(&[(
+                // FixedEngine adds the query's length: "KI Fertigung" is 12.
+                "https://ok.example/bericht?q=12",
+                200,
+                "text/html",
+                &article,
+            )])),
+            None,
+        )),
+        model: Arc::new(ScriptedModel::new(&[
+            ("You plan web research", Ok("KI Fertigung")),
+            ("You write research reports", Ok("# Bericht")),
+        ])),
+    };
+
+    researcher
+        .research(
+            "KI in der Fertigung",
+            ResearchModel::Mini,
+            Some("de"),
+            &RecordedProgress::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("research failed: {error}"));
+
+    let languages = engine
+        .languages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(!languages.is_empty(), "research searched nothing");
+    assert!(
+        languages
+            .iter()
+            .all(|language| language.as_deref() == Some("de")),
+        "{languages:?}"
     );
 }

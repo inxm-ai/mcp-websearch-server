@@ -196,10 +196,13 @@ pub struct Researcher {
 }
 
 impl Researcher {
+    /// `language` is a checked [`crate::search::language`] code for every
+    /// search; `None` searches in SearXNG's default.
     pub async fn research(
         &self,
         request: &str,
         model: ResearchModel,
+        language: Option<&str>,
         progress: &dyn ProgressSink,
     ) -> Result<ResearchResult, ResearchFailure> {
         let limits = limits(model);
@@ -226,6 +229,7 @@ impl Researcher {
                 days: DEFAULT_NEWS_DAYS,
                 start_date: None,
                 end_date: None,
+                language: language.map(str::to_string),
             };
             async move {
                 run_search(

@@ -60,6 +60,9 @@ impl SearchEngine for SearxngClient {
         if let Some(time_range) = engine_query.time_range {
             parameters.push(("time_range", time_range_parameter(time_range)));
         }
+        if let Some(language) = engine_query.language.as_deref() {
+            parameters.push(("language", language));
+        }
         let response = self
             .http
             .get(self.search_url.clone())
