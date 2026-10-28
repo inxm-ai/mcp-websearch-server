@@ -46,10 +46,50 @@ impl Category {
 }
 
 /// One query sent to SearXNG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineQuery {
     pub category: Category,
     pub time_range: Option<TimeRange>,
+    /// A [`language`] code; `None` leaves SearXNG's own default (the chart's
+    /// `searxng.defaultLanguage`).
+    pub language: Option<String>,
+}
+
+/// A language code that is not `xx` or `xx-YY`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("language must be an ISO 639-1 code, optionally with a region, such as \"de\" or \"de-DE\"; got {0:?}")]
+pub struct InvalidLanguage(pub String);
+
+const LANGUAGE_LETTERS: std::ops::RangeInclusive<usize> = 2..=3;
+const REGION_LETTERS: usize = 2;
+
+/// The language a request searches in, as SearXNG spells it: `de`, `de-DE`.
+/// Blank means none; `_` is read as `-` and case is normalised, so `DE_de`
+/// becomes `de-DE`.
+pub fn language(raw: Option<&str>) -> Result<Option<String>, InvalidLanguage> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    let invalid = || InvalidLanguage(raw.to_string());
+    let mut parts = raw.split(['-', '_']);
+    let code = parts.next().unwrap_or_default();
+    let region = parts.next();
+    let letters = |part: &str| {
+        part.chars()
+            .all(|character| character.is_ascii_alphabetic())
+    };
+    if parts.next().is_some() || !LANGUAGE_LETTERS.contains(&code.len()) || !letters(code) {
+        return Err(invalid());
+    }
+    match region {
+        None => Ok(Some(code.to_ascii_lowercase())),
+        Some(region) if region.len() == REGION_LETTERS && letters(region) => Ok(Some(format!(
+            "{}-{}",
+            code.to_ascii_lowercase(),
+            region.to_ascii_uppercase()
+        ))),
+        Some(_) => Err(invalid()),
+    }
 }
 
 /// The time range a request searches: its own `time_range`, or for news the
@@ -70,20 +110,19 @@ pub fn effective_time_range(request: &SearchRequest) -> Option<TimeRange> {
 /// The SearXNG queries for a topic. SearXNG's news category alone is thin
 /// (often a single engine answers), so `news` also searches the general
 /// category in the same time range; news results come first.
-pub fn engine_queries(topic: Topic, time_range: Option<TimeRange>) -> Vec<EngineQuery> {
-    let general = EngineQuery {
-        category: Category::General,
+pub fn engine_queries(
+    topic: Topic,
+    time_range: Option<TimeRange>,
+    language: Option<&str>,
+) -> Vec<EngineQuery> {
+    let query = |category| EngineQuery {
+        category,
         time_range,
+        language: language.map(str::to_string),
     };
     match topic {
-        Topic::General => vec![general],
-        Topic::News => vec![
-            EngineQuery {
-                category: Category::News,
-                time_range,
-            },
-            general,
-        ],
+        Topic::General => vec![query(Category::General)],
+        Topic::News => vec![query(Category::News), query(Category::General)],
     }
 }
 
@@ -210,6 +249,7 @@ pub struct CacheKey {
     pub query: String,
     pub topic: Topic,
     pub time_range: Option<TimeRange>,
+    pub language: Option<String>,
 }
 
 /// In-memory search answers, each reused for `ttl`, at most `capacity` of
@@ -279,7 +319,8 @@ pub struct SearchOutcome {
 
 /// Runs `request` against `engine`, answering from `cache` when it can. A
 /// search fails only when every category query fails; complete, non-empty
-/// answers are cached.
+/// answers are cached. `request.language` must already be checked with
+/// [`language`].
 pub async fn run_search(
     engine: &dyn SearchEngine,
     cache: &SearchCache,
@@ -291,6 +332,7 @@ pub async fn run_search(
         query: request.query.trim().to_string(),
         topic: request.topic,
         time_range,
+        language: request.language.clone(),
     };
     if let Some(response) = cache.get(&key, now) {
         return Ok(SearchOutcome {
@@ -300,11 +342,11 @@ pub async fn run_search(
         });
     }
 
-    let queries = engine_queries(request.topic, time_range);
+    let queries = engine_queries(request.topic, time_range, key.language.as_deref());
     let answers = futures::future::join_all(
         queries
-            .iter()
-            .map(|engine_query| engine.query(&key.query, *engine_query)),
+            .into_iter()
+            .map(|engine_query| engine.query(&key.query, engine_query)),
     )
     .await;
     let failed_queries = answers.iter().filter(|answer| answer.is_err()).count();
