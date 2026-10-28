@@ -154,10 +154,6 @@ impl WebSearch {
         &self,
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<Json<SearchResponse>, ToolFailure> {
-        let request = SearchRequest {
-            language: checked_language(request.language.as_deref())?,
-            ..request
-        };
         let span = tracing::info_span!(
             "tool.search",
             tool.latency_ms = field::Empty,
@@ -166,6 +162,13 @@ impl WebSearch {
             search.result_count = field::Empty,
         );
         let started = Instant::now();
+        // Checked inside the span, so a refused call is traced too.
+        let language = checked_language(request.language.as_deref())
+            .inspect_err(|_| record_latency(&span, started))?;
+        let request = SearchRequest {
+            language,
+            ..request
+        };
         let outcome = run_search(
             self.search_engine.as_ref(),
             &self.search_cache,
@@ -314,13 +317,14 @@ impl WebSearch {
             research.source_count = field::Empty,
         );
         let model = request.model.unwrap_or_default();
-        let language = checked_language(request.language.as_deref())?;
         span.record("research.model", format!("{model:?}").to_lowercase());
+        let started = Instant::now();
+        let language = checked_language(request.language.as_deref())
+            .inspect_err(|_| record_latency(&span, started))?;
         let progress = PeerProgress {
             peer,
             token: meta.get_progress_token(),
         };
-        let started = Instant::now();
         let result = self
             .researcher
             .research(&request.input, model, language.as_deref(), &progress)
