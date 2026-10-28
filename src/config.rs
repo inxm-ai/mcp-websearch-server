@@ -9,7 +9,7 @@ use anyhow::Context;
 use url::Url;
 
 /// In-cluster Service the chart gives the SearXNG Deployment.
-pub const DEFAULT_SEARXNG_URL: &str = "http://mcp-websearch-server-searxng:8080";
+pub const DEFAULT_SEARXNG_URL: &str = "http://ext-mcp-websearch-server-searxng:8080";
 
 /// The model alias tgi-core routes; the bridge's chart sets the same.
 pub const DEFAULT_MODEL: &str = "tgi";

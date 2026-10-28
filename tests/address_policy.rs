@@ -49,7 +49,7 @@ fn private_loopback_link_local_and_cluster_literals_are_refused() {
 fn internal_host_names_are_refused() {
     for url in [
         "http://localhost:8000/",
-        "http://mcp-websearch-server-searxng:8080/search",
+        "http://ext-mcp-websearch-server-searxng:8080/search",
         "http://app-tgi-core.orchestrator.svc.cluster.local:8000/v1",
         "http://printer.local/",
         "http://metadata.google.internal/",

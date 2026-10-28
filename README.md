@@ -38,7 +38,7 @@ credentials or cookies are carried between pages.
 
 ## Data
 
-- **SearXNG** (`SEARXNG_URL`, default `http://mcp-websearch-server-searxng:8080`):
+- **SearXNG** (`SEARXNG_URL`, default `http://ext-mcp-websearch-server-searxng:8080`):
   upstream image, deployed by this chart (`searxng.enabled`) with a
   `settings.yml` that enables the JSON API and Brave, DuckDuckGo, Bing, Bing
   News and Google News, and runs every search without `languages` in

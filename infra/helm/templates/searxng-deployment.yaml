@@ -2,18 +2,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Values.appName }}-searxng
+  name: {{ include "mcp-websearch-server-chart.searxngName" . }}
   labels:
-    app: {{ .Values.appName }}-searxng
+    app: {{ include "mcp-websearch-server-chart.searxngName" . }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ .Values.appName }}-searxng
+      app: {{ include "mcp-websearch-server-chart.searxngName" . }}
   template:
     metadata:
       labels:
-        app: {{ .Values.appName }}-searxng
+        app: {{ include "mcp-websearch-server-chart.searxngName" . }}
       annotations:
         # Roll the pod when the settings change.
         checksum/settings: {{ include (print $.Template.BasePath "/searxng-configmap.yaml") . | sha256sum }}
@@ -28,7 +28,7 @@ spec:
             - name: SEARXNG_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.appName }}-searxng
+                  name: {{ include "mcp-websearch-server-chart.searxngName" . }}
                   key: secret
           volumeMounts:
             - name: settings
@@ -53,5 +53,5 @@ spec:
       volumes:
         - name: settings
           configMap:
-            name: {{ .Values.appName }}-searxng
+            name: {{ include "mcp-websearch-server-chart.searxngName" . }}
 {{- end }}

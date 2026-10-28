@@ -101,13 +101,23 @@ every browser in the pool when render is enabled.
 {{- end -}}
 
 {{/*
+The name of SearXNG's objects. `ext-` like other MCP charts' dependencies
+(ext-<app>-postgres): app-mcp-manager registers every Service in the
+namespace whose name starts with `mcp-` as an MCP server, and SearXNG is not
+one.
+*/}}
+{{- define "mcp-websearch-server-chart.searxngName" -}}
+{{- printf "ext-%s-searxng" .Values.appName -}}
+{{- end -}}
+
+{{/*
 Where the server reaches SearXNG.
 */}}
 {{- define "mcp-websearch-server-chart.searxngUrl" -}}
 {{- if .Values.searxng.url -}}
 {{- .Values.searxng.url -}}
 {{- else if .Values.searxng.enabled -}}
-{{- printf "http://%s-searxng:%v" .Values.appName .Values.searxng.port -}}
+{{- printf "http://%s:%v" (include "mcp-websearch-server-chart.searxngName" .) .Values.searxng.port -}}
 {{- else -}}
 {{- fail "searxng.enabled is false: set searxng.url to the SearXNG the server should use" -}}
 {{- end -}}
