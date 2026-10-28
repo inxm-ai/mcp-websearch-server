@@ -15,6 +15,9 @@ pub const DEFAULT_SEARXNG_URL: &str = "http://mcp-websearch-server-searxng:8080"
 pub const DEFAULT_MODEL: &str = "tgi";
 const DEFAULT_RENDER_POOL_SIZE: usize = 2;
 const DEFAULT_RENDER_TIMEOUT_SECS: u64 = 20;
+/// Most languages one search may ask for; each is another round of engine
+/// queries.
+const DEFAULT_SEARCH_MAX_LANGUAGES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -31,6 +34,8 @@ pub struct Config {
     pub default_model: String,
     /// The OTel collector's OTLP/gRPC endpoint; no export when unset.
     pub otlp_endpoint: Option<String>,
+    /// Most languages one `search` or `web_research` call may name.
+    pub search_max_languages: usize,
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -77,6 +82,7 @@ impl Config {
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            search_max_languages: parsed_env("SEARCH_MAX_LANGUAGES", DEFAULT_SEARCH_MAX_LANGUAGES)?,
         })
     }
 }

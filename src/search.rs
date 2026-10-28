@@ -50,45 +50,91 @@ impl Category {
 pub struct EngineQuery {
     pub category: Category,
     pub time_range: Option<TimeRange>,
-    /// A [`language`] code; `None` leaves SearXNG's own default (the chart's
-    /// `searxng.defaultLanguage`).
+    /// A [`languages`] code; `None` leaves SearXNG's own default (the
+    /// chart's `searxng.defaultLanguage`).
     pub language: Option<String>,
 }
 
-/// A language code that is not `xx` or `xx-YY`.
+/// Why a request's `languages` cannot be searched.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("language must be an ISO 639-1 code, optionally with a region, such as \"de\" or \"de-DE\"; got {0:?}")]
-pub struct InvalidLanguage(pub String);
+pub enum InvalidLanguages {
+    #[error("languages are ISO 639-1 codes, optionally with a region, such as \"de\" or \"de-DE\"; got {0:?}")]
+    Code(String),
+    /// SearXNG's `all` gives Bing no market, which then picks one itself
+    /// (Chinese, from a datacenter IP).
+    #[error("\"all\" is not a language: name the languages to search, e.g. [\"de\", \"en\"]")]
+    All,
+    #[error("at most {max} languages per call; got {count}")]
+    TooMany { count: usize, max: usize },
+}
 
-const LANGUAGE_LETTERS: std::ops::RangeInclusive<usize> = 2..=3;
+const LANGUAGE_LETTERS: usize = 2;
 const REGION_LETTERS: usize = 2;
+const ALL_LANGUAGES: &str = "all";
 
-/// The language a request searches in, as SearXNG spells it: `de`, `de-DE`.
-/// Blank means none; `_` is read as `-` and case is normalised, so `DE_de`
-/// becomes `de-DE`.
-pub fn language(raw: Option<&str>) -> Result<Option<String>, InvalidLanguage> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    let invalid = || InvalidLanguage(raw.to_string());
+/// One language as SearXNG spells it: `de`, `de-DE`. `_` is read as `-` and
+/// case is normalised, so `DE_de` becomes `de-DE`.
+fn language(raw: &str) -> Result<String, InvalidLanguages> {
+    if raw.eq_ignore_ascii_case(ALL_LANGUAGES) {
+        return Err(InvalidLanguages::All);
+    }
+    let invalid = || InvalidLanguages::Code(raw.to_string());
     let mut parts = raw.split(['-', '_']);
     let code = parts.next().unwrap_or_default();
     let region = parts.next();
-    let letters = |part: &str| {
-        part.chars()
-            .all(|character| character.is_ascii_alphabetic())
+    let letters = |part: &str, count: usize| {
+        part.len() == count
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
     };
-    if parts.next().is_some() || !LANGUAGE_LETTERS.contains(&code.len()) || !letters(code) {
+    if parts.next().is_some() || !letters(code, LANGUAGE_LETTERS) {
         return Err(invalid());
     }
+    let code = code.to_ascii_lowercase();
     match region {
-        None => Ok(Some(code.to_ascii_lowercase())),
-        Some(region) if region.len() == REGION_LETTERS && letters(region) => Ok(Some(format!(
-            "{}-{}",
-            code.to_ascii_lowercase(),
-            region.to_ascii_uppercase()
-        ))),
+        None => Ok(code),
+        Some(region) if letters(region, REGION_LETTERS) => {
+            Ok(format!("{code}-{}", region.to_ascii_uppercase()))
+        }
         Some(_) => Err(invalid()),
+    }
+}
+
+/// The languages a request searches in, checked and normalised, each once,
+/// in the caller's order. None, or only blanks, is no language: SearXNG's
+/// default applies.
+pub fn languages(raw: Option<&[String]>, max: usize) -> Result<Vec<String>, InvalidLanguages> {
+    let mut checked: Vec<String> = Vec::new();
+    for raw in raw.unwrap_or_default().iter().map(|raw| raw.trim()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let language = language(raw)?;
+        if !checked.contains(&language) {
+            checked.push(language);
+        }
+    }
+    if checked.len() > max {
+        return Err(InvalidLanguages::TooMany {
+            count: checked.len(),
+            max,
+        });
+    }
+    Ok(checked)
+}
+
+/// Takes one result from each list in turn, so with several languages each
+/// gets a share of the capped answer.
+pub fn interleave(lists: Vec<Vec<EngineResult>>) -> Vec<EngineResult> {
+    let mut iterators: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut interleaved = Vec::new();
+    loop {
+        let before = interleaved.len();
+        interleaved.extend(iterators.iter_mut().filter_map(Iterator::next));
+        if interleaved.len() == before {
+            return interleaved;
+        }
     }
 }
 
@@ -249,7 +295,7 @@ pub struct CacheKey {
     pub query: String,
     pub topic: Topic,
     pub time_range: Option<TimeRange>,
-    pub language: Option<String>,
+    pub languages: Vec<String>,
 }
 
 /// In-memory search answers, each reused for `ttl`, at most `capacity` of
@@ -319,8 +365,8 @@ pub struct SearchOutcome {
 
 /// Runs `request` against `engine`, answering from `cache` when it can. A
 /// search fails only when every category query fails; complete, non-empty
-/// answers are cached. `request.language` must already be checked with
-/// [`language`].
+/// answers are cached. `request.languages` must already be checked with
+/// [`languages`]; each is searched, and their results interleaved.
 pub async fn run_search(
     engine: &dyn SearchEngine,
     cache: &SearchCache,
@@ -332,7 +378,7 @@ pub async fn run_search(
         query: request.query.trim().to_string(),
         topic: request.topic,
         time_range,
-        language: request.language.clone(),
+        languages: request.languages.clone().unwrap_or_default(),
     };
     if let Some(response) = cache.get(&key, now) {
         return Ok(SearchOutcome {
@@ -342,19 +388,40 @@ pub async fn run_search(
         });
     }
 
-    let queries = engine_queries(request.topic, time_range, key.language.as_deref());
+    // No language: one pass in SearXNG's default.
+    let passes: Vec<Option<&str>> = if key.languages.is_empty() {
+        vec![None]
+    } else {
+        key.languages
+            .iter()
+            .map(|language| Some(language.as_str()))
+            .collect()
+    };
+    let queries: Vec<(usize, EngineQuery)> = passes
+        .iter()
+        .enumerate()
+        .flat_map(|(pass, language)| {
+            engine_queries(request.topic, time_range, *language)
+                .into_iter()
+                .map(move |engine_query| (pass, engine_query))
+        })
+        .collect();
     let answers = futures::future::join_all(
         queries
-            .into_iter()
-            .map(|engine_query| engine.query(&key.query, engine_query)),
+            .iter()
+            .map(|(_, engine_query)| engine.query(&key.query, engine_query.clone())),
     )
     .await;
     let failed_queries = answers.iter().filter(|answer| answer.is_err()).count();
     let mut responses = Vec::new();
+    let mut results_by_pass: Vec<Vec<EngineResult>> = vec![Vec::new(); passes.len()];
     let mut last_error = None;
-    for answer in answers {
+    for ((pass, _), answer) in queries.iter().zip(answers) {
         match answer {
-            Ok(response) => responses.push(response),
+            Ok(response) => {
+                results_by_pass[*pass].extend(response.results.iter().cloned());
+                responses.push(response);
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "a search category query failed");
                 last_error = Some(error);
@@ -367,14 +434,11 @@ pub async fn run_search(
         }
     }
 
-    let result_lists: Vec<Vec<EngineResult>> = responses
-        .iter()
-        .map(|response| response.results.clone())
-        .collect();
+    let interleaved = interleave(results_by_pass);
     let response = SearchResponse {
         query: request.query.clone(),
         answer: String::new(),
-        results: merge_results(&result_lists, MAX_RESULTS),
+        results: merge_results(&[interleaved], MAX_RESULTS),
     };
     if failed_queries == 0 && !response.results.is_empty() {
         cache.put(key, response.clone(), now);
