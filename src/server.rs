@@ -34,14 +34,15 @@ use crate::llm_adapter::{TgiChatModel, UnconfiguredModel};
 use crate::model::ChatModel;
 use crate::render_adapter::StygianRenderer;
 use crate::research::{Phase, ProgressSink, Researcher};
-use crate::search::{language, run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
+use crate::search::{languages, run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
 
-/// A tool's `language` argument as SearXNG spells it; a malformed one is the
-/// caller's to fix.
-fn checked_language(raw: Option<&str>) -> Result<Option<String>, ToolFailure> {
-    language(raw).map_err(|error| ToolFailure::new(FailureKind::InvalidArgument, error.to_string()))
+/// A tool's `languages` argument as SearXNG spells them; a malformed one,
+/// or too many, is the caller's to fix.
+fn checked_languages(raw: Option<&[String]>, max: usize) -> Result<Vec<String>, ToolFailure> {
+    languages(raw, max)
+        .map_err(|error| ToolFailure::new(FailureKind::InvalidArgument, error.to_string()))
 }
 
 /// Records how long the tool call took on its span.
@@ -58,6 +59,8 @@ pub struct WebSearch {
     page_reader: Arc<PageReader>,
     crawler: Arc<Crawler>,
     researcher: Arc<Researcher>,
+    /// Most languages one call may name (`SEARCH_MAX_LANGUAGES`).
+    max_languages: usize,
 }
 
 /// Reports research phases as MCP progress notifications, when the caller
@@ -137,6 +140,7 @@ impl WebSearch {
             search_cache,
             page_reader,
             http,
+            max_languages: config.search_max_languages,
         })
     }
 }
@@ -163,10 +167,10 @@ impl WebSearch {
         );
         let started = Instant::now();
         // Checked inside the span, so a refused call is traced too.
-        let language = checked_language(request.language.as_deref())
+        let languages = checked_languages(request.languages.as_deref(), self.max_languages)
             .inspect_err(|_| record_latency(&span, started))?;
         let request = SearchRequest {
-            language,
+            languages: Some(languages),
             ..request
         };
         let outcome = run_search(
@@ -319,7 +323,7 @@ impl WebSearch {
         let model = request.model.unwrap_or_default();
         span.record("research.model", format!("{model:?}").to_lowercase());
         let started = Instant::now();
-        let language = checked_language(request.language.as_deref())
+        let languages = checked_languages(request.languages.as_deref(), self.max_languages)
             .inspect_err(|_| record_latency(&span, started))?;
         let progress = PeerProgress {
             peer,
@@ -327,7 +331,7 @@ impl WebSearch {
         };
         let result = self
             .researcher
-            .research(&request.input, model, language.as_deref(), &progress)
+            .research(&request.input, model, &languages, &progress)
             .instrument(span.clone())
             .await;
         record_latency(&span, started);

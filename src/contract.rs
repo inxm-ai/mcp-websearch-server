@@ -59,12 +59,13 @@ pub struct SearchRequest {
     /// Accepted for compatibility; see `start_date`.
     #[serde(default)]
     pub end_date: Option<String>,
-    /// Language to search in: an ISO 639-1 code, optionally with a region,
-    /// e.g. "de", "de-DE", "fr", "en-GB". Pass the language the user writes
-    /// in, so results come in that language. Without it, results are in
-    /// English.
+    /// Languages to search in, as ISO 639-1 codes, optionally with a
+    /// region: e.g. ["de"], ["de-DE"], or ["de", "fr", "en", "es"] for
+    /// several at once (results are mixed across them; the server allows a few, 4 by
+    /// default). Pass the
+    /// language the user writes in. Without it, results are in English.
     #[serde(default)]
-    pub language: Option<String>,
+    pub languages: Option<Vec<String>>,
 }
 
 /// One web search hit.
@@ -235,11 +236,12 @@ pub struct ResearchRequest {
     /// `mini` (default) or `pro` for twice the searches and sources.
     #[serde(default)]
     pub model: Option<ResearchModel>,
-    /// Language to search in: an ISO 639-1 code, optionally with a region,
-    /// e.g. "de", "de-DE", "fr". Pass the language the user writes in.
-    /// Without it, searches run in English.
+    /// Languages to search in, as ISO 639-1 codes, optionally with a
+    /// region: e.g. ["de"] or ["de", "en"] (the server allows a few,
+    /// 4 by default). Pass the language the
+    /// user writes in. Without it, searches run in English.
     #[serde(default)]
-    pub language: Option<String>,
+    pub languages: Option<Vec<String>>,
 }
 
 /// A source the report cites; every one was read successfully.

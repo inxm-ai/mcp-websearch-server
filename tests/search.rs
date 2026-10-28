@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mcp_websearch_server::contract::{SearchRequest, TimeRange, Topic, DEFAULT_NEWS_DAYS};
 use mcp_websearch_server::search::{
-    effective_time_range, engine_queries, language, merge_results, run_search, snippet, Category,
-    EngineQuery, EngineResponse, EngineResult, InvalidLanguage, SearchCache, SearchEngine,
-    SearchError, CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
+    effective_time_range, engine_queries, interleave, languages, merge_results, run_search,
+    snippet, Category, EngineQuery, EngineResponse, EngineResult, InvalidLanguages, SearchCache,
+    SearchEngine, SearchError, CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
 };
 
 fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRequest {
@@ -20,7 +20,7 @@ fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRe
         days: DEFAULT_NEWS_DAYS,
         start_date: None,
         end_date: None,
-        language: None,
+        languages: None,
     }
 }
 
@@ -150,7 +150,7 @@ fn cache_entries_expire_after_their_ttl() {
         query: "q".into(),
         topic: Topic::General,
         time_range: None,
-        language: None,
+        languages: Vec::new(),
     };
     let response = mcp_websearch_server::contract::SearchResponse {
         query: "q".into(),
@@ -211,64 +211,189 @@ impl ScriptedEngine {
     }
 }
 
+fn owned(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(|raw| raw.to_string()).collect()
+}
+
 #[test]
-fn language_takes_a_code_with_an_optional_region_and_normalises_case() {
-    let cases = [
-        (None, None),
-        (Some(""), None),
-        (Some("  "), None),
-        (Some("de"), Some("de")),
-        (Some(" DE "), Some("de")),
-        (Some("de-DE"), Some("de-DE")),
-        (Some("de_de"), Some("de-DE")),
-        (Some("EN-gb"), Some("en-GB")),
-        (Some("all"), Some("all")),
+fn languages_take_codes_with_an_optional_region_normalised_once_each() {
+    let cases: [(Option<&[&str]>, &[&str]); 7] = [
+        (None, &[]),
+        (Some(&[]), &[]),
+        (Some(&["", "  "]), &[]),
+        (Some(&["de"]), &["de"]),
+        (Some(&[" DE ", "de_de", "EN-gb"]), &["de", "de-DE", "en-GB"]),
+        (Some(&["de", "fr", "en", "es"]), &["de", "fr", "en", "es"]),
+        (Some(&["de", "DE", "fr", "de"]), &["de", "fr"]),
     ];
     for (raw, expected) in cases {
+        let raw = raw.map(owned);
         assert_eq!(
-            language(raw),
-            Ok(expected.map(str::to_string)),
-            "language({raw:?})"
+            languages(raw.as_deref(), 4),
+            Ok(owned(expected)),
+            "languages({raw:?})"
         );
     }
 }
 
 #[test]
-fn language_refuses_what_searxng_would_not_read() {
+fn languages_refuse_what_searxng_would_not_read() {
     for raw in [
-        "german", "d", "de-DEU", "de-D3", "d3", "de-DE-x", "auto", "de DE", "-DE",
+        "german", "d", "deu", "de-DEU", "de-D3", "d3", "de-DE-x", "auto", "de DE", "-DE",
     ] {
         assert_eq!(
-            language(Some(raw)),
-            Err(InvalidLanguage(raw.to_string())),
-            "language({raw:?})"
+            languages(Some(&owned(&["en", raw])), 4),
+            Err(InvalidLanguages::Code(raw.to_string())),
+            "languages([en, {raw:?}])"
         );
     }
+}
+
+#[test]
+fn all_is_refused_because_it_gives_bing_no_market() {
+    for raw in ["all", "ALL", " All "] {
+        assert_eq!(
+            languages(Some(&owned(&[raw])), 4),
+            Err(InvalidLanguages::All),
+            "languages([{raw:?}])"
+        );
+    }
+}
+
+#[test]
+fn languages_are_capped_after_duplicates_collapse() {
+    assert_eq!(
+        languages(Some(&owned(&["de", "fr", "en", "es", "it"])), 4),
+        Err(InvalidLanguages::TooMany { count: 5, max: 4 })
+    );
+    assert_eq!(
+        languages(Some(&owned(&["de", "fr", "en", "es", "de"])), 4),
+        Ok(owned(&["de", "fr", "en", "es"]))
+    );
+}
+
+#[test]
+fn interleaving_takes_one_from_each_list_in_turn() {
+    let list = |urls: &[&str]| urls.iter().map(|url| hit(url, None)).collect::<Vec<_>>();
+    let urls: Vec<String> = interleave(vec![
+        list(&["de1", "de2", "de3"]),
+        list(&["fr1"]),
+        list(&[]),
+        list(&["en1", "en2"]),
+    ])
+    .into_iter()
+    .map(|result| result.url)
+    .collect();
+    assert_eq!(urls, owned(&["de1", "fr1", "en1", "de2", "en2", "de3"]));
 }
 
 #[tokio::test]
-async fn the_language_reaches_every_searxng_query_of_a_search() {
+async fn each_language_is_searched_and_the_answer_mixes_them() {
     let engine = ScriptedEngine {
-        news: Ok(vec![hit("https://news.example/1", None)]),
+        news: Ok(Vec::new()),
         general: Ok(vec![hit("https://web.example/1", None)]),
         calls: Mutex::new(Vec::new()),
     };
     let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
-    let german = SearchRequest {
-        language: Some("de".into()),
+    let search = SearchRequest {
+        languages: Some(owned(&["de", "fr"])),
         ..request("Bundesliga", Topic::News, None)
     };
-    run_search(&engine, &cache, &german, Instant::now())
+    run_search(&engine, &cache, &search, Instant::now())
         .await
         .unwrap_or_else(|error| panic!("search failed: {error}"));
+    let calls: Vec<(Category, Option<String>)> = engine
+        .calls()
+        .into_iter()
+        .map(|call| (call.category, call.language))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (Category::News, Some("de".to_string())),
+            (Category::General, Some("de".to_string())),
+            (Category::News, Some("fr".to_string())),
+            (Category::General, Some("fr".to_string())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn without_languages_one_pass_runs_in_searxngs_default() {
+    let engine = ScriptedEngine {
+        news: Ok(Vec::new()),
+        general: Ok(vec![hit("https://web.example/1", None)]),
+        calls: Mutex::new(Vec::new()),
+    };
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
+    run_search(
+        &engine,
+        &cache,
+        &request("inxm", Topic::General, None),
+        Instant::now(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("search failed: {error}"));
     let languages: Vec<Option<String>> = engine
         .calls()
         .into_iter()
         .map(|call| call.language)
         .collect();
+    assert_eq!(languages, vec![None]);
+}
+
+/// Answers each language with its own URLs, so their share of the answer
+/// shows.
+struct PerLanguageEngine;
+
+#[async_trait]
+impl SearchEngine for PerLanguageEngine {
+    async fn query(
+        &self,
+        _query: &str,
+        engine_query: EngineQuery,
+    ) -> Result<EngineResponse, SearchError> {
+        let language = engine_query.language.unwrap_or_default();
+        Ok(EngineResponse {
+            results: (1..=10)
+                .map(|n| hit(&format!("https://{language}.example/{n}"), None))
+                .collect(),
+            unresponsive_engines: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn several_languages_share_the_capped_answer() {
+    let cache = SearchCache::new(CACHE_TTL, CACHE_CAPACITY);
+    let search = SearchRequest {
+        languages: Some(owned(&["de", "fr", "en", "es"])),
+        ..request("q", Topic::General, None)
+    };
+    let outcome = run_search(&PerLanguageEngine, &cache, &search, Instant::now())
+        .await
+        .unwrap_or_else(|error| panic!("search failed: {error}"));
+    let hosts: Vec<&str> = outcome
+        .response
+        .results
+        .iter()
+        .map(|result| result.url.split('/').nth(2).unwrap_or_default())
+        .collect();
+    assert_eq!(hosts.len(), MAX_RESULTS);
     assert_eq!(
-        languages,
-        vec![Some("de".to_string()), Some("de".to_string())]
+        hosts,
+        vec![
+            "de.example",
+            "fr.example",
+            "en.example",
+            "es.example",
+            "de.example",
+            "fr.example",
+            "en.example",
+            "es.example",
+            "de.example",
+            "fr.example",
+        ]
     );
 }
 
@@ -283,7 +408,7 @@ async fn a_search_in_another_language_is_not_answered_from_the_cache() {
     let now = Instant::now();
     let english = request("inxm", Topic::General, None);
     let german = SearchRequest {
-        language: Some("de".into()),
+        languages: Some(owned(&["de"])),
         ..english.clone()
     };
 
@@ -385,7 +510,7 @@ fn cache_key(query: &str) -> mcp_websearch_server::search::CacheKey {
         query: query.into(),
         topic: Topic::General,
         time_range: None,
-        language: None,
+        languages: Vec::new(),
     }
 }
 

@@ -67,6 +67,8 @@ spec:
               value: {{ .Values.render.poolSize | quote }}
             - name: RENDER_TIMEOUT_SECS
               value: {{ .Values.render.timeoutSeconds | quote }}
+            - name: SEARCH_MAX_LANGUAGES
+              value: {{ .Values.searxng.maxLanguages | quote }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: {{ .Values.appName }}-data

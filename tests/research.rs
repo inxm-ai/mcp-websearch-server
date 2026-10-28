@@ -164,7 +164,7 @@ async fn research_cites_only_pages_that_were_read() {
     let progress = RecordedProgress::default();
 
     let result = researcher
-        .research("state of AI adoption", ResearchModel::Mini, None, &progress)
+        .research("state of AI adoption", ResearchModel::Mini, &[], &progress)
         .await
         .unwrap_or_else(|error| panic!("research failed: {error}"));
 
@@ -227,7 +227,7 @@ async fn research_reads_at_most_the_source_limit() {
         .research(
             "topic",
             ResearchModel::Mini,
-            None,
+            &[],
             &RecordedProgress::default(),
         )
         .await
@@ -245,7 +245,7 @@ async fn research_fails_when_nothing_could_be_read_or_the_model_is_down() {
             .research(
                 "topic",
                 ResearchModel::Mini,
-                None,
+                &[],
                 &RecordedProgress::default()
             )
             .await,
@@ -261,7 +261,7 @@ async fn research_fails_when_nothing_could_be_read_or_the_model_is_down() {
             .research(
                 "topic",
                 ResearchModel::Pro,
-                None,
+                &[],
                 &RecordedProgress::default()
             )
             .await,
@@ -291,7 +291,7 @@ impl SearchEngine for LanguageRecordingEngine {
 }
 
 #[tokio::test]
-async fn research_searches_in_the_language_it_is_given() {
+async fn research_searches_in_each_language_it_is_given() {
     let article = format!("<p>{PROSE}</p>");
     let engine = Arc::new(LanguageRecordingEngine {
         inner: FixedEngine {
@@ -322,7 +322,7 @@ async fn research_searches_in_the_language_it_is_given() {
         .research(
             "KI in der Fertigung",
             ResearchModel::Mini,
-            Some("de"),
+            &["de".to_string(), "en".to_string()],
             &RecordedProgress::default(),
         )
         .await
@@ -333,11 +333,9 @@ async fn research_searches_in_the_language_it_is_given() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    assert!(!languages.is_empty(), "research searched nothing");
-    assert!(
-        languages
-            .iter()
-            .all(|language| language.as_deref() == Some("de")),
-        "{languages:?}"
+    assert_eq!(
+        languages,
+        vec![Some("de".to_string()), Some("en".to_string())],
+        "the planned query is searched once per language"
     );
 }

@@ -54,6 +54,9 @@ searxng:
   # datacenter IP was Chinese for queries such as "inxm". en gives every
   # engine a market (Bing en-us, DuckDuckGo us-en, Brave us).
   defaultLanguage: en
+  # Most languages one search or web_research call may name; each is another
+  # round of engine queries (two with topic news).
+  maxLanguages: 4
   # Google proper answers "access denied" from datacenter and residential
   # IPs alike, so it stays off; these are the engines that answer.
   engines:
