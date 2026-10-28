@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mcp_websearch_server::contract::{SearchRequest, TimeRange, Topic, DEFAULT_NEWS_DAYS};
 use mcp_websearch_server::search::{
-    effective_time_range, engine_queries, interleave, languages, merge_results, run_search,
-    snippet, Category, EngineQuery, EngineResponse, EngineResult, InvalidLanguages, SearchCache,
-    SearchEngine, SearchError, CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
+    effective_time_range, engine_queries, interleave, languages, merge_results, result_hosts,
+    run_search, snippet, Category, EngineQuery, EngineResponse, EngineResult, InvalidLanguages,
+    SearchCache, SearchEngine, SearchError, CACHE_CAPACITY, CACHE_TTL, MAX_RESULTS,
 };
 
 fn request(query: &str, topic: Topic, time_range: Option<TimeRange>) -> SearchRequest {
@@ -574,4 +574,18 @@ fn unique_queries_never_grow_the_cache_past_its_capacity() {
         );
     }
     assert_eq!(cache.len(), CACHE_CAPACITY);
+}
+
+#[test]
+fn result_hosts_names_each_hit_by_host_in_order() {
+    assert_eq!(
+        result_hosts([
+            "https://www.zhihu.com/question/19581089",
+            "https://inxm.ai/",
+            "not a url",
+            "https://de.uefa.com/x?y=1#z",
+        ]),
+        "www.zhihu.com,inxm.ai,?,de.uefa.com"
+    );
+    assert_eq!(result_hosts([]), "");
 }

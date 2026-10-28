@@ -34,7 +34,9 @@ use crate::llm_adapter::{TgiChatModel, UnconfiguredModel};
 use crate::model::ChatModel;
 use crate::render_adapter::StygianRenderer;
 use crate::research::{Phase, ProgressSink, Researcher};
-use crate::search::{languages, run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL};
+use crate::search::{
+    languages, result_hosts, run_search, SearchCache, SearchEngine, CACHE_CAPACITY, CACHE_TTL,
+};
 use crate::searxng_adapter::SearxngClient;
 use crate::tool_failure::{FailureKind, ToolFailure};
 
@@ -49,6 +51,17 @@ fn checked_languages(raw: Option<&[String]>, max: usize) -> Result<Vec<String>, 
 fn record_latency(span: &tracing::Span, started: Instant) {
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     span.record("tool.latency_ms", latency_ms);
+}
+
+/// Marks the tool span as failed, with the failure's kind as `error.type`,
+/// so refused and failed calls show as errors in traces. The span must
+/// declare `otel.status_code` and `error.type`.
+fn failed(span: &tracing::Span, started: Instant, failure: ToolFailure) -> ToolFailure {
+    record_latency(span, started);
+    span.record("otel.status_code", "ERROR");
+    span.record("error.type", failure.kind.as_str());
+    tracing::warn!(parent: span, error = %failure, "tool call failed");
+    failure
 }
 
 #[derive(Clone)]
@@ -149,9 +162,10 @@ impl WebSearch {
 impl WebSearch {
     /// Search the web for up-to-date information. At most 10 results, each
     /// with title, URL and snippet; with `topic: "news"` snippets start with
-    /// the publication date. `answer` is always empty.
+    /// the publication date. In English unless `languages` names others.
+    /// `answer` is always empty.
     #[tool(
-        description = "Search the web for real-time information about any topic. Use this tool when you need up-to-date information that might not be available in your training data, or when you need to verify current facts. Returns at most 10 results with title, URL and snippet; with topic \"news\" snippets start with the publication date when known. `answer` is always empty.\n\nExamples:\n{\"query\": \"What are the latest advancements in AI technology?\", \"topic\": \"general\", \"time_range\": \"month\"}\n{\"query\": \"Recent news about space exploration\", \"topic\": \"news\", \"days\": 3}\n{\"query\": \"Current trends in renewable energy\", \"topic\": \"general\", \"time_range\": \"week\"}",
+        description = "Search the web for real-time information about any topic. Use this tool when you need up-to-date information that might not be available in your training data, or when you need to verify current facts. Returns at most 10 results with title, URL and snippet; with topic \"news\" snippets start with the publication date when known. `answer` is always empty. Results are in English unless `languages` names others: pass the language the user writes in as an ISO 639-1 language code (\"de\", \"fr\", \"zh\"; not a country code such as \"us\" or \"cn\"), or several to search them all at once (results are mixed across them).\n\nExamples:\n{\"query\": \"What are the latest advancements in AI technology?\", \"topic\": \"general\", \"time_range\": \"month\"}\n{\"query\": \"Recent news about space exploration\", \"topic\": \"news\", \"days\": 3}\n{\"query\": \"Current trends in renewable energy\", \"topic\": \"general\", \"time_range\": \"week\"}\n{\"query\": \"Bundesliga Spielplan\", \"languages\": [\"de\"]}\n{\"query\": \"Champions League final\", \"topic\": \"news\", \"languages\": [\"de\", \"fr\", \"en\", \"es\"]}",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn search(
@@ -160,15 +174,21 @@ impl WebSearch {
     ) -> Result<Json<SearchResponse>, ToolFailure> {
         let span = tracing::info_span!(
             "tool.search",
+            otel.status_code = field::Empty,
+            error.type = field::Empty,
             tool.latency_ms = field::Empty,
+            search.languages = field::Empty,
             search.cache_hit = field::Empty,
             search.unresponsive_engines = field::Empty,
             search.result_count = field::Empty,
+            search.result_hosts = field::Empty,
         );
         let started = Instant::now();
         // Checked inside the span, so a refused call is traced too.
         let languages = checked_languages(request.languages.as_deref(), self.max_languages)
-            .inspect_err(|_| record_latency(&span, started))?;
+            .map_err(|failure| failed(&span, started, failure))?;
+        // Empty: SearXNG's default (searxng.defaultLanguage).
+        span.record("search.languages", languages.join(","));
         let request = SearchRequest {
             languages: Some(languages),
             ..request
@@ -181,15 +201,24 @@ impl WebSearch {
         )
         .instrument(span.clone())
         .await;
+        let outcome = outcome.map_err(|error| {
+            failed(
+                &span,
+                started,
+                ToolFailure::new(FailureKind::UpstreamFailed, error.to_string()),
+            )
+        })?;
         record_latency(&span, started);
-        let outcome = outcome
-            .map_err(|error| ToolFailure::new(FailureKind::UpstreamFailed, error.to_string()))?;
         span.record("search.cache_hit", outcome.cache_hit);
         span.record(
             "search.unresponsive_engines",
             outcome.unresponsive_engines.join(","),
         );
         span.record("search.result_count", outcome.response.results.len());
+        span.record(
+            "search.result_hosts",
+            result_hosts(outcome.response.results.iter().map(|hit| hit.url.as_str())),
+        );
         Ok(Json(outcome.response))
     }
 
@@ -232,6 +261,8 @@ impl WebSearch {
     ) -> Result<Json<DownloadedFile>, ToolFailure> {
         let span = tracing::info_span!(
             "tool.download_file",
+            otel.status_code = field::Empty,
+            error.type = field::Empty,
             tool.latency_ms = field::Empty,
             url.full = %loggable_url(&request.url),
         );
@@ -239,8 +270,14 @@ impl WebSearch {
         let file = download(self.http.as_ref(), &request.url)
             .instrument(span.clone())
             .await;
+        let file = file.map_err(|failure| {
+            failed(
+                &span,
+                started,
+                ToolFailure::new(failure.kind(), failure.to_string()),
+            )
+        })?;
         record_latency(&span, started);
-        let file = file.map_err(|failure| ToolFailure::new(failure.kind(), failure.to_string()))?;
         Ok(Json(file))
     }
 
@@ -279,8 +316,13 @@ impl WebSearch {
         Parameters(request): Parameters<CrawlCompanyRequest>,
     ) -> Result<Json<ExtractResponse>, ToolFailure> {
         let span = crawl_span("tool.crawl_company_website");
+        let started = Instant::now();
         let invalid = |error: crate::crawl::CrawlError| {
-            ToolFailure::new(FailureKind::InvalidArgument, error.to_string())
+            failed(
+                &span,
+                started,
+                ToolFailure::new(FailureKind::InvalidArgument, error.to_string()),
+            )
         };
         let plan = CrawlPlan {
             start_url: request.url,
@@ -301,7 +343,7 @@ impl WebSearch {
 
     /// Research a topic: search, read the best sources, write a report.
     #[tool(
-        description = "An advanced research agent that performs comprehensive research on a given topic by conducting multiple searches, reading the best sources, and writing a detailed markdown report. The report cites only sources that were read, as [n] numbered like `sources`. `model`: \"mini\" (default; up to 3 searches and 8 sources) or \"pro\" (a larger model, up to 6 searches and 16 sources). Reports progress as it goes: searching, reading, writing.\n\nIMPORTANT: For anything that requires in-depth information gathering, data synthesis, or extensive analysis of a topic, prefer this tool over search or extraction tools.\n\nExamples:\n{\"input\": \"Comprehensive overview of the latest advancements in renewable energy technologies.\"}\n{\"input\": \"In-depth analysis of the impact of artificial intelligence on modern healthcare systems and patient care.\"}",
+        description = "An advanced research agent that performs comprehensive research on a given topic by conducting multiple searches, reading the best sources, and writing a detailed markdown report. The report cites only sources that were read, as [n] numbered like `sources`. `model`: \"mini\" (default; up to 3 searches and 8 sources) or \"pro\" (a larger model, up to 6 searches and 16 sources). Reports progress as it goes: searching, reading, writing. Searches in English unless `languages` names others: pass the language the user writes in as an ISO 639-1 language code (\"de\", \"fr\"; not a country code such as \"us\"), or several.\n\nIMPORTANT: For anything that requires in-depth information gathering, data synthesis, or extensive analysis of a topic, prefer this tool over search or extraction tools.\n\nExamples:\n{\"input\": \"Comprehensive overview of the latest advancements in renewable energy technologies.\"}\n{\"input\": \"In-depth analysis of the impact of artificial intelligence on modern healthcare systems and patient care.\"}\n{\"input\": \"Überblick über KI in der deutschen Fertigungsindustrie\", \"languages\": [\"de\"]}",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -316,15 +358,20 @@ impl WebSearch {
     ) -> Result<Json<ResearchResult>, ToolFailure> {
         let span = tracing::info_span!(
             "tool.web_research",
+            otel.status_code = field::Empty,
+            error.type = field::Empty,
             tool.latency_ms = field::Empty,
             research.model = field::Empty,
+            research.languages = field::Empty,
             research.source_count = field::Empty,
         );
         let model = request.model.unwrap_or_default();
         span.record("research.model", format!("{model:?}").to_lowercase());
         let started = Instant::now();
         let languages = checked_languages(request.languages.as_deref(), self.max_languages)
-            .inspect_err(|_| record_latency(&span, started))?;
+            .map_err(|failure| failed(&span, started, failure))?;
+        // Empty: SearXNG's default (searxng.defaultLanguage).
+        span.record("research.languages", languages.join(","));
         let progress = PeerProgress {
             peer,
             token: meta.get_progress_token(),
@@ -334,10 +381,14 @@ impl WebSearch {
             .research(&request.input, model, &languages, &progress)
             .instrument(span.clone())
             .await;
-        record_latency(&span, started);
         let result = result.map_err(|failure| {
-            ToolFailure::new(FailureKind::UpstreamFailed, failure.to_string())
+            failed(
+                &span,
+                started,
+                ToolFailure::new(FailureKind::UpstreamFailed, failure.to_string()),
+            )
         })?;
+        record_latency(&span, started);
         span.record("research.source_count", result.sources.len());
         Ok(Json(result))
     }
@@ -351,7 +402,13 @@ impl WebSearch {
         &self,
         Parameters(_request): Parameters<SocialMediaRequest>,
     ) -> Result<Json<SocialMediaSearchResults>, ToolFailure> {
-        Err(social_media_not_available())
+        let span = tracing::info_span!(
+            "tool.search_social_media",
+            otel.status_code = field::Empty,
+            error.type = field::Empty,
+            tool.latency_ms = field::Empty,
+        );
+        Err(failed(&span, Instant::now(), social_media_not_available()))
     }
 }
 
@@ -367,6 +424,8 @@ fn crawl_span(name: &'static str) -> tracing::Span {
     tracing::info_span!(
         "tool.crawl",
         otel.name = name,
+        otel.status_code = field::Empty,
+        error.type = field::Empty,
         tool.latency_ms = field::Empty,
         crawl.pages_read = field::Empty,
         crawl.timed_out = field::Empty,
