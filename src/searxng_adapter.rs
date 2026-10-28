@@ -21,7 +21,7 @@ pub struct SearxngClient {
 
 impl SearxngClient {
     /// A client for the SearXNG instance at `base_url`, e.g.
-    /// `http://mcp-websearch-server-searxng:8080`.
+    /// `http://ext-mcp-websearch-server-searxng:8080`.
     pub fn new(base_url: &Url) -> anyhow::Result<Self> {
         let mut base = base_url.clone();
         if !base.path().ends_with('/') {

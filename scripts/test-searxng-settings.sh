@@ -21,4 +21,16 @@ if helm template mcp-websearch-server "${CHART_DIR}" --set searxng.defaultLangua
   exit 1
 fi
 
+# app-mcp-manager registers every Service in the namespace whose name starts
+# with mcp- as an MCP server; only the server itself may.
+rendered="$(helm template mcp-websearch-server "${CHART_DIR}")"
+services="$(yq -r 'select(.kind == "Service") | .metadata.name' <<<"${rendered}" | sed '/^---$/d')"
+test "$(grep -c '^mcp-' <<<"${services}")" = "1"
+grep -qx 'mcp-websearch-server' <<<"${services}"
+grep -qx 'ext-mcp-websearch-server-searxng' <<<"${services}"
+# The server is pointed at that Service.
+test "$(yq -r 'select(.kind == "Deployment" and .metadata.name == "mcp-websearch-server")
+  | .spec.template.spec.containers[0].env[] | select(.name == "SEARXNG_URL") | .value' <<<"${rendered}")" \
+  = "http://ext-mcp-websearch-server-searxng:8080"
+
 echo "mcp-websearch-server SearXNG settings checks passed"

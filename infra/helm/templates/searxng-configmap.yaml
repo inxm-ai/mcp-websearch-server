@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Values.appName }}-searxng
+  name: {{ include "mcp-websearch-server-chart.searxngName" . }}
   labels:
-    app: {{ .Values.appName }}-searxng
+    app: {{ include "mcp-websearch-server-chart.searxngName" . }}
 data:
   # Upstream defaults, cut down to the engines in searxng.engines (Google
   # proper is not among them), with the JSON API on and the limiter off:

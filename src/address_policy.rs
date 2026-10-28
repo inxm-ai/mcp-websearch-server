@@ -82,7 +82,7 @@ fn public_or_refused(ip: IpAddr) -> Result<(), Refusal> {
     }
 }
 
-/// Single-label names (`mcp-websearch-server-searxng`) and private suffixes
+/// Single-label names (`ext-mcp-websearch-server-searxng`) and private suffixes
 /// only resolve inside the cluster or a private network.
 fn check_host_name(name: &str) -> Result<(), Refusal> {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
