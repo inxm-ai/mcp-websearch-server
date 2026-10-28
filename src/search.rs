@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use tracing::{field, Instrument};
+use url::Url;
 
 use crate::contract::{SearchHit, SearchRequest, SearchResponse, TimeRange, Topic};
 
@@ -124,6 +126,20 @@ pub fn languages(raw: Option<&[String]>, max: usize) -> Result<Vec<String>, Inva
     Ok(checked)
 }
 
+/// The hosts of `urls`, in order, comma-separated, for a span: what a
+/// search brought back, without the full URLs. Unparsable URLs show as `?`.
+pub fn result_hosts<'a>(urls: impl IntoIterator<Item = &'a str>) -> String {
+    urls.into_iter()
+        .map(|url| {
+            Url::parse(url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_string))
+                .unwrap_or_else(|| "?".to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Takes one result from each list in turn, so with several languages each
 /// gets a share of the capped answer.
 pub fn interleave(lists: Vec<Vec<EngineResult>>) -> Vec<EngineResult> {
@@ -202,6 +218,17 @@ pub enum SearchError {
     Status(u16),
     #[error("the search backend answered something other than search results: {0}")]
     Decode(String),
+}
+
+impl SearchError {
+    /// A short name for traces (`error.type`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SearchError::Unreachable(_) => "unreachable",
+            SearchError::Status(_) => "http_status",
+            SearchError::Decode(_) => "decode",
+        }
+    }
 }
 
 /// Port to the metasearch backend.
@@ -406,24 +433,53 @@ pub async fn run_search(
                 .map(move |engine_query| (pass, engine_query))
         })
         .collect();
-    let answers = futures::future::join_all(
-        queries
-            .iter()
-            .map(|(_, engine_query)| engine.query(&key.query, engine_query.clone())),
-    )
-    .await;
+    // One span per SearXNG query, so a trace shows what each language and
+    // category brought back.
+    let spans: Vec<tracing::Span> = queries
+        .iter()
+        .map(|(_, engine_query)| {
+            tracing::info_span!(
+                "search.engine_query",
+                otel.status_code = field::Empty,
+                error.type = field::Empty,
+                search.category = engine_query.category.as_searxng(),
+                search.language = engine_query.language.as_deref().unwrap_or(""),
+                search.result_count = field::Empty,
+                search.result_hosts = field::Empty,
+                search.unresponsive_engines = field::Empty,
+            )
+        })
+        .collect();
+    let answers =
+        futures::future::join_all(queries.iter().zip(&spans).map(|((_, engine_query), span)| {
+            engine
+                .query(&key.query, engine_query.clone())
+                .instrument(span.clone())
+        }))
+        .await;
     let failed_queries = answers.iter().filter(|answer| answer.is_err()).count();
     let mut responses = Vec::new();
     let mut results_by_pass: Vec<Vec<EngineResult>> = vec![Vec::new(); passes.len()];
     let mut last_error = None;
-    for ((pass, _), answer) in queries.iter().zip(answers) {
+    for (((pass, _), span), answer) in queries.iter().zip(&spans).zip(answers) {
         match answer {
             Ok(response) => {
+                span.record("search.result_count", response.results.len());
+                span.record(
+                    "search.result_hosts",
+                    result_hosts(response.results.iter().map(|result| result.url.as_str())),
+                );
+                span.record(
+                    "search.unresponsive_engines",
+                    unresponsive_engine_names(std::slice::from_ref(&response)).join(","),
+                );
                 results_by_pass[*pass].extend(response.results.iter().cloned());
                 responses.push(response);
             }
             Err(error) => {
-                tracing::warn!(error = %error, "a search category query failed");
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error.kind());
+                tracing::warn!(parent: span, error = %error, "a search category query failed");
                 last_error = Some(error);
             }
         }
