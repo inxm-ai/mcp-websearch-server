@@ -10,13 +10,10 @@ name: Build and publish
 #   chart  oci://ghcr.io/inxm-ai/charts/mcp-websearch-server at its Chart.yaml
 #          version, from main only.
 #
-# ACR and ECR, which lz-infra's deploy reads, get their copies from
-# infrastructure-owned workflows, as enterprise-mcp-bridge's do: lz-azure and
-# lz-aws "002-4 Sync mcp-websearch-server" copy the image (same digest) and
-# the chart from GHCR. This repo is public, so it can neither call their
-# internal reusable workflows (push-to-acr.yml, push-to-ecr.yml) nor read org
-# secrets such as GH_DEPLOY_TOKEN; it publishes with GITHUB_TOKEN only and
-# deploys nothing.
+# Other registries copy the image (same digest) and the chart from GHCR
+# themselves, on their own schedule; nothing here pushes to them. This repo
+# is public, so it publishes with GITHUB_TOKEN only, reads no other secrets,
+# and deploys nothing.
 #
 # Pull requests run ci.yaml and harness.yaml on their own.
 
@@ -51,13 +48,13 @@ jobs:
     outputs:
       ghcr-tags: ${{ steps.meta.outputs.tags }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # enterprise-mcp-bridge's tags; the labels link the GHCR package to
       # this repo.
       - name: Image tags and labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -65,13 +62,13 @@ jobs:
             type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
             type=ref,event=tag
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # One OCI archive holding one image, which every push job copies
       # unchanged. linux/amd64 only: no cluster runs ARM. The image ci.yaml
       # checked comes from the same Dockerfile and build cache.
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
@@ -82,7 +79,7 @@ jobs:
 
       # Same Helm as push-to-acr.yml and push-to-ecr.yml; Marketplace
       # installs use Helm 3.
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.14.4
 
@@ -91,14 +88,14 @@ jobs:
 
       # push-ghcr downloads them by these names.
       - name: Upload chart
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chart
           path: dist/chart/*.tgz
           if-no-files-found: error
 
       - name: Upload image
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image
           path: dist/image/*.tar
@@ -114,7 +111,7 @@ jobs:
       packages: write
     steps:
       - name: Download image
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image
           path: image
@@ -157,12 +154,12 @@ jobs:
 
       - name: Download chart
         if: ${{ github.ref == 'refs/heads/main' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: chart
           path: chart
 
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         if: ${{ github.ref == 'refs/heads/main' }}
         with:
           version: v3.14.4
