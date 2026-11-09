@@ -17,7 +17,7 @@ RUN cargo build --release --locked
 # digest, and Dependabot opens a PR when `latest` moves, so the check runs on
 # the new bridge before it deploys. The reference stays literal because
 # Dependabot doesn't read it through ARG variables.
-FROM ghcr.io/inxm-ai/enterprise-mcp-bridge:latest@sha256:5c72589f0715b0cea7f0eefd1ee39179eb9470040e8c812f1764dec18c45a440
+FROM ghcr.io/inxm-ai/enterprise-mcp-bridge:latest@sha256:4d02ad9e1e7f64cbbf84cef75caa264e9eb681361b167f5a6d34ba5edf654a5f
 # Chromium for the render stage of `extract` and the crawlers (stygian-browser
 # drives it over CDP). Debian's package follows the security updates of the
 # bridge's base release; fonts-liberation gives pages a usable default font.
