@@ -140,6 +140,11 @@ resources:
     cpu: 500m
     memory: 1Gi
 
+# Whether the server's and SearXNG's pods get a Kubernetes API token.
+# Unset by default, so customer installs keep Kubernetes' behaviour; INXM's
+# shared space sets false, as its controller requires of every pod.
+automountServiceAccountToken: null
+
 # Where the server's and SearXNG's pods run (affinity: the server's only).
 # Empty by default; INXM's shared space sets its own node pool.
 nodeSelector: {}

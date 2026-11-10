@@ -18,6 +18,9 @@ spec:
         # Roll the pod when the settings change.
         checksum/settings: {{ include (print $.Template.BasePath "/searxng-configmap.yaml") . | sha256sum }}
     spec:
+      {{- if not (kindIs "invalid" .Values.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- end }}
       {{- with .Values.searxng.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

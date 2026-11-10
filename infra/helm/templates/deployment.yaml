@@ -20,6 +20,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- if not (kindIs "invalid" .Values.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- end }}
       # The image's non-root user (Dockerfile); fsGroup lets it write /data.
       securityContext:
         runAsNonRoot: true

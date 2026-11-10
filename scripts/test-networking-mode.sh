@@ -43,6 +43,7 @@ helm template mcp-websearch-server "${CHART_DIR}" \
   --set render.enabled=false \
   --set searxng.podSecurityContext.runAsNonRoot=true \
   --set searxng.securityContext.allowPrivilegeEscalation=false \
+  --set automountServiceAccountToken=false \
   --set nodeSelector.pool=shared \
   --set 'tolerations[0].key=pool' > "${WORK_DIR}/shared-space.yaml"
 test "$(grep -c -E '^kind: (PersistentVolumeClaim|HorizontalPodAutoscaler)$' "${WORK_DIR}/shared-space.yaml" || true)" -eq 0
@@ -53,10 +54,12 @@ test "$(grep -c 'Unconfined' "${WORK_DIR}/shared-space.yaml" || true)" -eq 0
 test "$(grep -c 'pool: shared' "${WORK_DIR}/shared-space.yaml" || true)" -eq 2
 test "$(grep -c 'key: pool' "${WORK_DIR}/shared-space.yaml" || true)" -eq 2
 grep -q 'allowPrivilegeEscalation: false' "${WORK_DIR}/shared-space.yaml"
+# Both pods, the server's and SearXNG's, turn the API token off.
+test "$(grep -c '^      automountServiceAccountToken: false$' "${WORK_DIR}/shared-space.yaml" || true)" -eq 2
 # Customer installs keep the orchestrator namespace and render no placement
 # of their own.
 grep -q 'namespace: orchestrator' "${WORK_DIR}/gateway.yaml"
-test "$(grep -c -E 'nodeSelector|tolerations|affinity' "${WORK_DIR}/gateway.yaml" || true)" -eq 0
+test "$(grep -c -E 'nodeSelector|tolerations|affinity|automountServiceAccountToken' "${WORK_DIR}/gateway.yaml" || true)" -eq 0
 
 if helm template mcp-websearch-server-invalid "${CHART_DIR}" \
   --set networking.mode=gateway > /dev/null 2>&1; then
