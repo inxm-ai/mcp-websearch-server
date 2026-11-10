@@ -18,10 +18,29 @@ spec:
         # Roll the pod when the settings change.
         checksum/settings: {{ include (print $.Template.BasePath "/searxng-configmap.yaml") . | sha256sum }}
     spec:
+      {{- if not (kindIs "invalid" .Values.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- end }}
+      {{- with .Values.searxng.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: searxng
           image: {{ .Values.searxng.image.repository }}:{{ .Values.searxng.image.tag }}
           imagePullPolicy: {{ .Values.searxng.image.pullPolicy }}
+          {{- with .Values.searxng.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.searxng.port }}
           env:

@@ -20,6 +20,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- if not (kindIs "invalid" .Values.automountServiceAccountToken) }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- end }}
       # The image's non-root user (Dockerfile); fsGroup lets it write /data.
       securityContext:
         runAsNonRoot: true
@@ -31,6 +34,18 @@ spec:
         - name: {{ .Values.appName }}-data
           persistentVolumeClaim:
             claimName: {{ .Values.appName }}-data
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: {{ .Values.appName }}

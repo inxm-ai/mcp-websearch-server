@@ -34,6 +34,8 @@ jobs:
       - run: helm lint infra/helm
       - run: helm template mcp-websearch-server infra/helm >/dev/null
       - run: bash scripts/test-searxng-settings.sh
+      # Routing, and the shared-space and customer renders.
+      - run: bash scripts/test-networking-mode.sh
 
   # The publish wiring: workflow syntax, then what build-and-publish.yaml
   # and the playbook must keep (scripts/test-publish-workflow.sh).

@@ -2,6 +2,10 @@ appName: mcp-websearch-server
 description: "Self-hosted web search, page extraction, crawl and research MCP server: SearXNG for search, stygian-browser for rendering"
 replicaCount: 1
 
+# The namespace the Service and route are created in. Customer installs use
+# orchestrator; INXM's shared space sets its own.
+namespace: orchestrator
+
 image:
   repository: inxm-ai/mcp-websearch-server
   tag: latest
@@ -19,6 +23,10 @@ networking:
     parentRefs:
       - name: orchestrator-gateway
         sectionName: https
+    # Puts the platform's sign-in proxy (iam-oauth2-proxy) in front of the
+    # route. INXM's shared space has none and turns it off: the bridge checks
+    # every token itself there.
+    externalAuth: true
 
 env:
   SERVICE_NAME: mcp-websearch-server
@@ -65,6 +73,10 @@ searxng:
     - bing
     - bing news
     - google news
+  # SearXNG's pod and container security settings, empty by default. INXM's
+  # shared space sets ones that pass Pod Security "restricted".
+  podSecurityContext: {}
+  securityContext: {}
   resources:
     requests:
       cpu: 50m
@@ -128,6 +140,13 @@ resources:
     cpu: 500m
     memory: 1Gi
 
+# Whether the server's and SearXNG's pods get a Kubernetes API token.
+# Unset by default, so customer installs keep Kubernetes' behaviour; INXM's
+# shared space sets false, as its controller requires of every pod.
+automountServiceAccountToken: null
+
+# Where the server's and SearXNG's pods run (affinity: the server's only).
+# Empty by default; INXM's shared space sets its own node pool.
 nodeSelector: {}
 
 tolerations: []
