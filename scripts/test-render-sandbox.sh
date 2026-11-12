@@ -97,12 +97,18 @@ while kill -0 "${EXTRACT_PID}" 2>/dev/null; do
   docker exec "${CONTAINER}" sh -c '
     # Anchored on the binary: an unanchored pattern also matches this shell.
     for pid in $(pgrep -f -- "^/usr/lib/chromium/chromium --type=renderer"); do
-      status=/proc/${pid}/status
+      status="$(cat /proc/${pid}/status 2>/dev/null)"
+      userns="$(readlink /proc/${pid}/ns/user 2>/dev/null)"
+      cmdline="$(tr "\0" " " 2>/dev/null < /proc/${pid}/cmdline)"
+      # A renderer can exit between pgrep and these reads, leaving them empty;
+      # that sample says nothing about its sandbox, so it is skipped rather
+      # than reported as unsandboxed. Live renderers are still checked.
+      { [ -n "${status}" ] && [ -n "${userns}" ] && [ -d /proc/${pid} ]; } || continue
       printf "%s uid=%s seccomp=%s nnp=%s ownns=%s nosandbox=%s\n" "${pid}" \
-        "$(awk "/^Uid:/{print \$2}" ${status})" "$(awk "/^Seccomp:/{print \$2}" ${status})" \
-        "$(awk "/^NoNewPrivs:/{print \$2}" ${status})" \
-        "$( [ "$(readlink /proc/${pid}/ns/user)" != "$(readlink /proc/1/ns/user)" ] && echo yes || echo no)" \
-        "$(tr "\0" " " < /proc/${pid}/cmdline | grep -c -- --no-sandbox)"
+        "$(echo "${status}" | awk "/^Uid:/{print \$2}")" "$(echo "${status}" | awk "/^Seccomp:/{print \$2}")" \
+        "$(echo "${status}" | awk "/^NoNewPrivs:/{print \$2}")" \
+        "$( [ "${userns}" != "$(readlink /proc/1/ns/user)" ] && echo yes || echo no)" \
+        "$(echo "${cmdline}" | grep -c -- --no-sandbox)"
     done' >> "${WORK_DIR}/renderers.txt" 2>/dev/null || true
   sleep 1
 done
